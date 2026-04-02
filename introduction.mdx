@@ -1,0 +1,91 @@
+---
+title: "Introduction"
+description: "wolfBoot is a portable, OS-agnostic secure bootloader for 32-bit microcontrollers that authenticates and updates firmware using wolfCrypt digital signatures."
+keywords: ["wolfBoot", "secure bootloader", "firmware authentication", "embedded", "wolfCrypt"]
+---
+
+wolfBoot is a memory-safe, standalone bootloader for embedded microcontrollers. Before handing off execution to your application, wolfBoot verifies the firmware image's authenticity using wolfCrypt's digital signature algorithms. If verification fails, the device does not boot the untrusted image.
+
+wolfBoot also provides a powerfail-safe firmware update mechanism: a new image is written to a secondary slot, and the bootloader performs a reversible swap only after cryptographic verification passes. If the application does not confirm a successful boot, wolfBoot rolls back to the previous firmware automatically.
+
+The design follows [RFC 9019 — A Firmware Update Architecture for Internet of Things](https://datatracker.ietf.org/doc/rfc9019/).
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Firmware authentication" icon="shield-check" href="/security/signing">
+    Every firmware image is verified with a digital signature (Ed25519, ECC256/384/521, RSA2048/3072/4096, Ed448, ML-DSA, LMS, XMSS) before execution.
+  </Card>
+  <Card title="Powerfail-safe updates" icon="arrows-rotate" href="/concepts/firmware-update">
+    Slot-swap updates with automatic rollback ensure the device always has a known-good firmware to fall back to.
+  </Card>
+  <Card title="Multi-slot flash partitioning" icon="layer-group" href="/concepts/flash-partitions">
+    BOOT, UPDATE, and SWAP partitions are laid out at compile time according to your flash geometry.
+  </Card>
+  <Card title="External flash support" icon="database" href="/security/encrypted-partitions">
+    Update and swap partitions can reside on external SPI flash or be accessed via UART bridge, with optional AES-128/256 encryption.
+  </Card>
+  <Card title="TPM 2.0 integration" icon="microchip" href="/integrations/tpm">
+    Measured boot, root of trust, and sealing/unsealing of secrets via wolfTPM.
+  </Card>
+  <Card title="Post-quantum ready" icon="atom" href="/security/post-quantum">
+    ML-DSA, LMS/HSS, and XMSS/XMSS^MT support for long-lived devices.
+  </Card>
+  <Card title="50+ supported targets" icon="list-check" href="/reference/targets/overview">
+    STM32, NXP i.MX-RT, Renesas, RISC-V, Nordic, Raspberry Pi, x86-64, and more.
+  </Card>
+  <Card title="Anti-rollback protection" icon="ban" href="/concepts/firmware-update">
+    Version numbers in the firmware manifest prevent downgrade attacks.
+  </Card>
+</CardGroup>
+
+## Architecture
+
+The bootloader is a single bare-metal binary that runs before the application. It is built from four components:
+
+### wolfCrypt
+
+wolfBoot uses wolfCrypt exclusively for all cryptographic operations — hashing (SHA-256, SHA-384, SHA-3) and digital signature verification. wolfCrypt is compiled as a strict subset with no dynamic allocation and no standard C library dependency.
+
+### Hardware Abstraction Layer (HAL)
+
+A minimalist HAL, implemented per target in `hal/<target>.c`, provides only the functions wolfBoot needs:
+
+- In-application flash programming (erase, write)
+- Clock initialization
+- Extended flash access (`ext_flash_*`) when `EXT_FLASH=1`
+
+This tiny API surface makes porting wolfBoot to a new MCU straightforward — implement a single C file and a linker script.
+
+### Core bootloader
+
+The core bootloader (`src/loader.c`, `src/image.c`, `src/update_flash.c`) drives the boot sequence:
+
+1. Locate the firmware manifest in the BOOT partition.
+2. Verify the image hash and digital signature.
+3. Check whether a pending update exists in the UPDATE partition; if so, verify and swap.
+4. Chain-load the application at the primary partition's entry point.
+
+### libwolfboot
+
+`src/libwolfboot.c` is a small library linked into the **application** (not the bootloader). It provides the API your firmware uses to interact with the bootloader at runtime:
+
+- `wolfBoot_update_trigger()` — mark the UPDATE partition as pending
+- `wolfBoot_success()` — confirm a successful boot to prevent rollback
+- Partition access helpers
+
+## Design principles
+
+**No dynamic memory allocation.** wolfBoot never calls `malloc` or `free`. All working buffers are stack-allocated or statically declared at compile time. When algorithm requirements exceed typical stack budgets, `WOLFBOOT_SMALL_STACK=1` switches to a fixed compile-time pool.
+
+**No standard C library.** The bootloader does not link against libc. String utilities, memory operations, and any other helpers are reimplemented in `src/string.c` to keep the trusted-computing base minimal.
+
+**Minimalist HAL.** Only flash access and clock setup are required. This keeps the porting effort low and the attack surface small.
+
+**Compile-time configuration.** Flash partition addresses and sizes, signing algorithm, and feature flags are all resolved at build time and baked into `include/target.h`. There is no runtime configuration parsing.
+
+**Fail-safe updates.** The swap is performed sector by sector, with progress flags written to flash after each step. A power failure at any point leaves the device in a recoverable state.
+
+<Note>
+  Ready to build your first signed firmware image? See the [Quick Start](/quickstart) guide.
+</Note>

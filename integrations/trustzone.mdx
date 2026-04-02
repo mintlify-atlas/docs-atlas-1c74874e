@@ -1,0 +1,175 @@
+---
+title: "TrustZone-M integration"
+description: "Run wolfBoot as the secure-mode supervisor on ARM Cortex-M33 devices with TrustZone-M, exposing NSC APIs to non-secure applications and an optional PKCS11 interface."
+---
+
+ARMv8-M microcontrollers (Cortex-M33 and later) implement TrustZone-M: a hardware-enforced separation between a **secure world** and a **non-secure world**. A third zone, the **Non-Secure Callable (NSC)** region, acts as the gateway through which non-secure code can invoke functions running in the secure world.
+
+wolfBoot runs entirely in the secure world. It verifies and boots the application, then transfers control to the non-secure domain. wolfCrypt can optionally remain resident in the secure domain, accessible to non-secure software through NSC APIs.
+
+## Supported targets
+
+<CardGroup cols={2}>
+  <Card title="STM32L5 series" icon="microchip" href="https://www.st.com/en/microcontrollers-microprocessors/stm32l5-series.html">
+    Cortex-M33 with TrustZone-M. Example config: `config/examples/stm32l5-wolfcrypt-tz.config`
+  </Card>
+  <Card title="STM32H5 series" icon="microchip" href="https://www.st.com/en/microcontrollers-microprocessors/stm32h5-series.html">
+    Cortex-M33 with TrustZone-M and dual-bank flash. Example configs: `stm32h5-tz.config`, `stm32h5-tz-dualbank-otp.config`
+  </Card>
+  <Card title="nRF5340" icon="microchip" href="https://www.nordicsemi.com/products/nrf5340">
+    Dual-core Cortex-M33 with TrustZone-M on the application core.
+  </Card>
+  <Card title="RP2350" icon="microchip" href="https://www.raspberrypi.com/products/rp2350/">
+    Dual Cortex-M33 cores with TrustZone-M support.
+  </Card>
+</CardGroup>
+
+## Build configuration
+
+Enable TrustZone-M support with `TZEN=1`. Enable the resident wolfCrypt library with `WOLFCRYPT_TZ=1`:
+
+```bash
+# Example: STM32L5 with wolfCrypt in TZ secure domain and PKCS11
+cp config/examples/stm32l5-wolfcrypt-tz.config .config
+make
+```
+
+Key build flags:
+
+| Flag | Description |
+|---|---|
+| `TZEN=1` | Enables TrustZone-M mode; activates NSC APIs |
+| `WOLFCRYPT_TZ=1` | Builds wolfCrypt into the secure domain and exposes NSC crypto APIs |
+| `WOLFCRYPT_TZ_PKCS11=1` | Adds a PKCS11 interface over the secure wolfCrypt instance |
+| `WOLFCRYPT_TZ_PSA=1` | Adds a PSA Crypto interface and PSA Initial Attestation (DICE) support |
+
+## How wolfBoot acts as the secure-mode supervisor
+
+<Steps>
+  <Step title="Secure boot in the secure domain">
+    wolfBoot executes entirely from the secure flash region. It verifies the firmware image signature before allowing execution to proceed.
+  </Step>
+  <Step title="Configure flash watermarks and option bytes">
+    The secure/non-secure flash boundary is set via device option bytes. wolfBoot must reside in the secure flash region; the application image is placed in non-secure flash.
+
+    The script `tools/scripts/set-stm32-tz-option-bytes.sh` reads `.config` and sets option bytes automatically using `STM32_Programmer_CLI`.
+  </Step>
+  <Step title="Transfer to non-secure world">
+    After successful verification, wolfBoot jumps to the non-secure application. The NSC region remains accessible as an API gateway.
+  </Step>
+  <Step title="Non-secure application calls back via NSC">
+    The application uses NSC wrappers to trigger updates, confirm a successful boot, or perform crypto operations — all without ever executing code in the secure domain directly.
+  </Step>
+</Steps>
+
+## NSC APIs available to non-secure applications
+
+When `TZEN=1` is set, the following Non-Secure Callable functions are available. All calls execute in the secure domain; the non-secure application provides only arguments.
+
+| NSC function | Underlying wolfBoot call | Description |
+|---|---|---|
+| `wolfBoot_nsc_success()` | `wolfBoot_success()` | Mark the current boot as successful, preventing rollback |
+| `wolfBoot_nsc_update_trigger()` | `wolfBoot_update_trigger()` | Request that the pending update be applied on next boot |
+| `wolfBoot_nsc_get_image_version(uint8_t part)` | `wolfBoot_get_image_version()` | Return the version field of the image in partition `part` |
+| `wolfBoot_nsc_current_firmware_version()` | `wolfBoot_current_firmware_version()` | Return the version of the currently running firmware |
+| `wolfBoot_nsc_update_firmware_version()` | `wolfBoot_update_firmware_version()` | Return the version of the pending update image |
+| `wolfBoot_nsc_get_partition_state(uint8_t part, uint8_t *st)` | `wolfBoot_get_partition_state()` | Read the state flags of a partition |
+| `wolfBoot_nsc_erase_update(uint32_t address, uint32_t len)` | — | Erase `len` bytes from the UPDATE partition starting at `address` (offset from partition start) |
+| `wolfBoot_nsc_write_update(uint32_t address, const uint8_t *buf, uint32_t len)` | — | Write `len` bytes to the UPDATE partition at `address` (offset from partition start) |
+
+<Note>
+The UPDATE and SWAP partitions reside in the secure flash domain. Non-secure applications can only access them through the `wolfBoot_nsc_erase_update` and `wolfBoot_nsc_write_update` wrappers.
+</Note>
+
+## PKCS11 interface in TrustZone secure mode
+
+When `WOLFCRYPT_TZ_PKCS11=1` is enabled, wolfBoot provides a standard PKCS11 interface to non-secure world code. Keys and PKCS11 objects are stored in a dedicated secure flash area and are never exposed to the non-secure domain.
+
+This allows TLS libraries and applications running in non-secure mode to use wolfCrypt with pre-provisioned keys through the standard PKCS11 API.
+
+## PSA Crypto and initial attestation
+
+`WOLFCRYPT_TZ_PSA=1` provides a PSA Crypto interface using wolfPSA in the secure domain, backed by the same secure flash keystore as PKCS11. When enabled, wolfBoot also exposes the PSA Initial Attestation API, which returns a COSE_Sign1 token built using the DICE flow in `src/dice/`.
+
+## Image header size requirements
+
+The vector table alignment required by Cortex-M33 affects the minimum `IMAGE_HEADER_SIZE`. The ARM specification requires the table to be aligned to the next power of two past its size.
+
+For example, STM32H5 devices have at least 146 interrupt channels. The next power of two past 146+16 is 256, requiring 256×4 = 1024-byte alignment. `IMAGE_HEADER_SIZE` must therefore be `1024` or a multiple.
+
+When using the sign tool standalone, pass the header size explicitly:
+
+```bash
+IMAGE_HEADER_SIZE=1024 ./tools/keytools/sign \
+  --sha256 --ecc256 myapp.bin wolfboot_signing_private_key.der 1
+```
+
+Example configurations in `config/examples/` already set the correct value for each supported target.
+
+## STM32L552 example
+
+<Steps>
+  <Step title="Configure and build">
+    ```bash
+    cp config/examples/stm32l5-wolfcrypt-tz.config .config
+    make
+    ```
+
+    `wolfboot.elf` and `test-app/image_v1_signed.bin` are generated as separate objects.
+  </Step>
+  <Step title="Set option bytes">
+    Verify the following option bytes are set on the device (key fields):
+
+    ```
+    TZEN         : 0x1 (Global TrustZone security enabled)
+    SECBOOTADD0  : 0x180000  (0xC000000)
+    SECWM1_PSTRT : 0x0  (0x8000000)
+    SECWM1_PEND  : 0x39 (0x8039000)
+    ```
+
+    The `tools/scripts/set-stm32-tz-option-bytes.sh` script can set these automatically.
+  </Step>
+  <Step title="Flash both images">
+    ```bash
+    STM32_Programmer_CLI -c port=swd -d wolfboot.bin 0x0C000000
+    STM32_Programmer_CLI -c port=swd -d test-app/image_v1_signed.bin 0x08040000
+    ```
+  </Step>
+  <Step title="Verify operation">
+    After reset, the LEDs indicate status in order:
+    - **Red LED**: Secure boot succeeded; application has started.
+    - **Blue LED**: PKCS11 token initialized and stored.
+    - **Green LED**: ECDSA sign/verify test passed.
+  </Step>
+</Steps>
+
+## STM32H563 example
+
+<Steps>
+  <Step title="Configure and build">
+    ```bash
+    # Pick one of the H5 configurations
+    cp config/examples/stm32h5-tz.config .config
+    # Or, with dual-bank flash:
+    # cp config/examples/stm32h5-tz-dualbank-otp.config .config
+    make
+    ```
+  </Step>
+  <Step title="Set option bytes">
+    Key option bytes for the STM32H5 (TZEN must be `0xB4`):
+
+    ```
+    TZEN         : 0xB4 (Trust zone enabled)
+    BOOT_UBE     : 0xB4 (OEM-iRoT user flash selected)
+    SECBOOTADD   : 0xC0000 (0xC000000)
+    SECWM1_STRT  : 0x0   (0x8000000)
+    SECWM1_END   : 0x2F  (0x805e000)
+    ```
+  </Step>
+  <Step title="Flash both images">
+    ```bash
+    STM32_Programmer_CLI -c port=swd -d wolfboot.bin 0x0C000000
+    STM32_Programmer_CLI -c port=swd -d test-app/image_v1_signed.bin 0x08060000
+    ```
+  </Step>
+</Steps>

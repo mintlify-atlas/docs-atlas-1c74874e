@@ -1,0 +1,291 @@
+---
+title: "Post-quantum signatures"
+description: "Use ML-DSA, LMS/HSS, or XMSS/XMSS^MT to protect wolfBoot against quantum computing threats, including hybrid classical + PQ configurations."
+---
+
+wolfBoot supports three NIST-approved post-quantum (PQ) signature algorithms. These algorithms are resistant to attacks by cryptographically relevant quantum computers, making them suitable for devices with long operational lifetimes.
+
+## Supported algorithms
+
+<CardGroup cols={3}>
+  <Card title="ML-DSA" icon="wave-square" href="#ml-dsa">
+    Lattice-based. FIPS 204. Fast key generation, larger public keys.
+  </Card>
+  <Card title="LMS/HSS" icon="binary" href="#lmshss">
+    Stateful hash-based. NIST SP 800-208. Compact public keys, tunable signature sizes.
+  </Card>
+  <Card title="XMSS/XMSS^MT" icon="tree" href="#xmssxmssmt">
+    Stateful hash-based. NIST SP 800-208. Standardized parameter string selection.
+  </Card>
+</CardGroup>
+
+## Algorithm tradeoffs
+
+| Algorithm | Public key size | Signature size | Key gen speed | Stateful |
+|-----------|----------------|----------------|---------------|----------|
+| ML-DSA-44 | 1312 bytes | 2420 bytes | Fast | No |
+| ML-DSA-65 | 1952 bytes | 3309 bytes | Fast | No |
+| ML-DSA-87 | 2592 bytes | 4627 bytes | Fast | No |
+| LMS (L=2, H=5, W=8) | Small | 2644 bytes | Moderate | Yes |
+| XMSS-SHA2_10_256 | Small | 2500 bytes | Moderate | Yes |
+
+<Warning>
+  LMS and XMSS use **stateful** private keys. Each key can only sign a finite number of messages. Signing with an exhausted key produces invalid signatures. Manage private keys carefully and track usage counts.
+</Warning>
+
+## ML-DSA
+
+ML-DSA (Module-Lattice Digital Signature Algorithm) is standardized in FIPS 204. It is derived from CRYSTALS-DILITHIUM and uses three parameter sets corresponding to different NIST security categories.
+
+| Parameter set | Private key | Public key | Signature | Security category |
+|--------------|-------------|------------|-----------|-------------------|
+| ML-DSA-44 | 2560 bytes | 1312 bytes | 2420 bytes | Category 2 |
+| ML-DSA-65 | 4032 bytes | 1952 bytes | 3309 bytes | Category 3 |
+| ML-DSA-87 | 4896 bytes | 2592 bytes | 4627 bytes | Category 5 |
+
+### Build configuration
+
+```
+SIGN=ML_DSA
+ML_DSA_LEVEL=2
+IMAGE_SIGNATURE_SIZE=2420
+IMAGE_HEADER_SIZE=8192
+```
+
+For Category 3 (ML-DSA-65):
+
+```
+ML_DSA_LEVEL=3
+IMAGE_SIGNATURE_SIZE=3309
+IMAGE_HEADER_SIZE=8192
+```
+
+For Category 5 (ML-DSA-87):
+
+```
+ML_DSA_LEVEL=5
+IMAGE_SIGNATURE_SIZE=4627
+IMAGE_HEADER_SIZE=12288
+WOLFBOOT_SECTOR_SIZE=0x3000
+```
+
+### Example config file
+
+The full simulated target example is at `config/examples/sim-ml-dsa.config`:
+
+```ini
+ARCH=sim
+TARGET=sim
+SIGN=ML_DSA
+HASH=SHA256
+ML_DSA_LEVEL=2
+IMAGE_SIGNATURE_SIZE=2420
+IMAGE_HEADER_SIZE=8192
+WOLFBOOT_PARTITION_SIZE=0x40000
+WOLFBOOT_SECTOR_SIZE=0x2000
+WOLFBOOT_PARTITION_BOOT_ADDRESS=0x20000
+WOLFBOOT_PARTITION_UPDATE_ADDRESS=0x60000
+WOLFBOOT_PARTITION_SWAP_ADDRESS=0xA0000
+WOLFBOOT_FIXED_PARTITIONS=1
+```
+
+Additional examples: `config/examples/sim-ml-dsa3.config` (Category 3) and `config/examples/sim-ml-dsa5.config` (Category 5).
+
+### Keygen and sign
+
+```bash
+# Generate ML-DSA keypair
+./tools/keytools/keygen --ml_dsa -g wolfboot_signing_private_key.der
+
+# Sign firmware
+./tools/keytools/sign --ml_dsa --sha256 image.bin \
+    wolfboot_signing_private_key.der 1
+```
+
+<Note>
+  The wolfCrypt ML-DSA implementation targets FIPS 204 final by default. To conform to the earlier FIPS 204 draft, build with `WOLFSSL_DILITHIUM_FIPS204_DRAFT`.
+</Note>
+
+## LMS/HSS
+
+LMS/HSS is a stateful hash-based signature scheme standardized in RFC 8554 and recommended by NIST SP 800-208. Signature size is controlled by three parameters: levels, height, and Winternitz.
+
+### Parameters
+
+| Parameter | Accepted values |
+|-----------|----------------|
+| `LMS_LEVELS` | 1–8 |
+| `LMS_HEIGHT` | 5, 10, 15, 20, 25 |
+| `LMS_WINTERNITZ` | 1, 2, 4, 8 |
+
+The total number of available signatures is `2^(levels × height)`. Larger Winternitz values produce smaller signatures at the cost of slower signing.
+
+Use the helper script to compute the signature length for your parameters:
+
+```bash
+./tools/lms/lms_siglen.sh 2 5 8
+# levels:     2
+# height:     5
+# winternitz: 8
+# signature length: 2644
+```
+
+### Build configuration
+
+```
+SIGN=LMS
+LMS_LEVELS=1
+LMS_HEIGHT=10
+LMS_WINTERNITZ=8
+IMAGE_SIGNATURE_SIZE=1456
+IMAGE_HEADER_SIZE=4096
+```
+
+### Example config file
+
+```ini
+# config/examples/sim-lms.config
+ARCH=sim
+TARGET=sim
+SIGN=LMS
+HASH=SHA256
+LMS_LEVELS=1
+LMS_HEIGHT=10
+LMS_WINTERNITZ=8
+IMAGE_SIGNATURE_SIZE=1456
+IMAGE_HEADER_SIZE=4096
+WOLFBOOT_PARTITION_SIZE=0x40000
+WOLFBOOT_SECTOR_SIZE=0x1000
+WOLFBOOT_PARTITION_BOOT_ADDRESS=0x20000
+WOLFBOOT_PARTITION_UPDATE_ADDRESS=0x60000
+WOLFBOOT_PARTITION_SWAP_ADDRESS=0xA0000
+WOLFBOOT_FIXED_PARTITIONS=1
+```
+
+### Keygen and sign
+
+```bash
+./tools/keytools/keygen --lms -g wolfboot_signing_private_key.der
+./tools/keytools/sign --lms --sha256 image.bin \
+    wolfboot_signing_private_key.der 1
+```
+
+## XMSS/XMSS^MT
+
+XMSS and XMSS^MT are stateful hash-based signature schemes standardized in NIST SP 800-208. They are configured by a single parameter string that selects the hash function, tree height, and output size.
+
+### Parameters
+
+The `XMSS_PARAMS` value must be a SHA-256 parameter set string from Tables 10 and 11 of NIST SP 800-208.
+
+Use the helper script to compute the signature length:
+
+```bash
+./tools/xmss/xmss_siglen.sh XMSS-SHA2_10_256
+# parameter set:    XMSS-SHA2_10_256
+# signature length: 2500
+
+./tools/xmss/xmss_siglen.sh XMSSMT-SHA2_20/2_256
+# parameter set:    XMSSMT-SHA2_20/2_256
+# signature length: 4963
+```
+
+### Build configuration
+
+```
+SIGN=XMSS
+XMSS_PARAMS='XMSS-SHA2_10_256'
+IMAGE_SIGNATURE_SIZE=2500
+IMAGE_HEADER_SIZE=8192
+```
+
+### Example config file
+
+```ini
+# config/examples/sim-xmss.config
+ARCH=sim
+TARGET=sim
+SIGN=XMSS
+HASH=SHA256
+XMSS_PARAMS='XMSS-SHA2_10_256'
+IMAGE_SIGNATURE_SIZE=2500
+IMAGE_HEADER_SIZE=8192
+WOLFBOOT_PARTITION_SIZE=0x40000
+WOLFBOOT_SECTOR_SIZE=0x2000
+WOLFBOOT_PARTITION_BOOT_ADDRESS=0x20000
+WOLFBOOT_PARTITION_UPDATE_ADDRESS=0x60000
+WOLFBOOT_PARTITION_SWAP_ADDRESS=0xA0000
+WOLFBOOT_FIXED_PARTITIONS=1
+```
+
+### Keygen and sign
+
+```bash
+./tools/keytools/keygen --xmss -g wolfboot_signing_private_key.der
+./tools/keytools/sign --xmss --sha256 image.bin \
+    wolfboot_signing_private_key.der 1
+```
+
+## Hybrid mode (classic + PQ)
+
+wolfBoot supports verifying **two signatures** sequentially — one classical and one post-quantum — before loading firmware. This allows a phased transition to PQ cryptography and protects against vulnerabilities in either algorithm.
+
+Hybrid mode requires `WOLFBOOT_UNIVERSAL_KEYSTORE=1` so the keystore can hold keys of different types.
+
+### Example config (ML-DSA-65 + ECC-384)
+
+```ini
+# config/examples/sim-ml-dsa-ecc-hybrid.config
+ARCH=sim
+TARGET=sim
+SIGN=ML_DSA
+ML_DSA_LEVEL=3
+IMAGE_SIGNATURE_SIZE=3309
+IMAGE_HEADER_SIZE=8192
+HASH=SHA256
+WOLFBOOT_UNIVERSAL_KEYSTORE=1
+SIGN_SECONDARY=ECC384
+WOLFBOOT_PARTITION_SIZE=0x40000
+WOLFBOOT_SECTOR_SIZE=0x2000
+WOLFBOOT_PARTITION_BOOT_ADDRESS=0x80000
+WOLFBOOT_PARTITION_UPDATE_ADDRESS=0x100000
+WOLFBOOT_PARTITION_SWAP_ADDRESS=0x180000
+WOLFBOOT_FIXED_PARTITIONS=1
+```
+
+### Generating keypairs for hybrid signatures
+
+Generate both keys in a single command:
+
+```bash
+./tools/keytools/keygen --ml_dsa -g wolfboot_signing_private_key.der \
+                        --ecc384 -g wolfboot_signing_second_private_key.der
+```
+
+Alternatively, generate them in two steps by importing the first public key when generating the second:
+
+```bash
+# Step 1: generate ML-DSA key
+./tools/keytools/keygen --ml_dsa -g wolfboot_signing_private_key.der
+
+# Step 2: extract the public key (skip the 16-byte keystore header)
+dd if=keystore.der of=ml_dsa-pubkey.der bs=1 skip=16
+
+# Step 3: generate ECC key while importing the ML-DSA public key
+./tools/keytools/keygen --ml_dsa -i ml_dsa-pubkey.der \
+                        --ecc384 -g wolfboot_signing_second_private_key.der
+```
+
+### Signing with hybrid keys
+
+Pass both algorithm flags and both private key files to the sign tool:
+
+```bash
+./tools/keytools/sign --ml_dsa --ecc384 --sha256 \
+    test-app/image.bin \
+    wolfboot_signing_private_key.der \
+    wolfboot_signing_second_private_key.der \
+    1
+```
+
+The output image contains both signatures. wolfBoot verifies both before loading the firmware.

@@ -1,0 +1,178 @@
+---
+title: "Firmware Image Format"
+description: "How wolfBoot structures every signed firmware image: the manifest header, TLV tags, binary layout, partition states, and the two-step validation process."
+---
+
+Every firmware image handled by wolfBoot is prepended with a **manifest header** before it is flashed to a partition. The header encodes the image version, hash, and signature as a series of typed TLV (type-length-value) fields. wolfBoot refuses to boot any image that cannot be fully verified against this header.
+
+## Firmware entry point
+
+wolfBoot can only chain-load firmware from the **BOOT partition**. The entry point of the application must be set to:
+
+```
+WOLFBOOT_PARTITION_BOOT_ADDRESS + IMAGE_HEADER_SIZE
+```
+
+`IMAGE_HEADER_SIZE` is provided by the build system and is always a multiple of 256 bytes, guaranteeing that the vector table is aligned when the bootloader relocates it before jumping to the application.
+
+## Manifest header structure
+
+The header begins with two fixed 32-bit fields, followed by one or more TLV tags. All multi-byte values are stored in **little-endian** format.
+
+### Binary layout
+
+```
+┌───────────────────────────────────────────────┐  offset 0
+│  Magic number  (4 bytes)  0x574F4C46 "WOLF"   │
+├───────────────────────────────────────────────┤  +4
+│  Firmware size (4 bytes)  excludes header      │
+├───────────────────────────────────────────────┤  +8  ← IMAGE_HEADER_OFFSET
+│  TLV: Type (2 B) | Length (2 B) | Value …     │
+│  ─ version        (type 0x0001, 4 B)           │
+│  ─ timestamp      (type 0x0002, 8 B)           │
+│  ─ sha digest     (type 0x0003, 32 B SHA-256)  │
+│  ─ pubkey hint    (type 0x0010, 32 B)          │
+│  ─ firmware type  (type 0x0004, 2 B)           │
+│  ─ signature      (type 0x0020, 64 B ED25519)  │
+│  ─ padding bytes  (0xFF, no length field)      │
+├───────────────────────────────────────────────┤
+│  Padding to next 256-byte boundary             │
+├───────────────────────────────────────────────┤  IMAGE_HEADER_SIZE
+│  Firmware binary (entry point here)            │
+└───────────────────────────────────────────────┘
+```
+
+<Note>
+  A padding byte is represented by a single `0xFF` value with **no** length
+  field. The next byte after a padding byte is treated as a new tag type.
+</Note>
+
+### Mandatory TLV tags
+
+| Type | Name | Size | Description |
+|------|------|------|-------------|
+| `0x0001` | Version | 4 B | Firmware version number |
+| `0x0002` | Timestamp | 8 B | Unix seconds at signing time |
+| `0x0003` | SHA-256 digest | 32 B | Hash of the firmware binary |
+| `0x0004` | Firmware type | 2 B | Partition type and auth algorithm |
+| `0x0010` | Public key hint | 32 B | SHA digest of the signing public key |
+| `0x0020` | Signature | variable | Digital signature over the header |
+
+### Relevant defines from `image.h`
+
+```c
+/* Magic numbers (little-endian target) */
+#define WOLFBOOT_MAGIC          0x574F4C46  /* "WOLF" */
+#define WOLFBOOT_MAGIC_TRAIL    0x424F4F54  /* "BOOT" */
+
+/* Header field offset past the two fixed 32-bit fields */
+#define IMAGE_HEADER_OFFSET     (2 * sizeof(uint32_t))
+
+/* TLV tag types */
+#define HDR_VERSION             0x01
+#define HDR_TIMESTAMP           0x02
+#define HDR_SHA256              0x03
+#define HDR_IMG_TYPE            0x04
+#define HDR_PUBKEY              0x10
+#define HDR_SIGNATURE           0x20
+
+/* Image type partition bits */
+#define HDR_IMG_TYPE_PART_MASK  0x000F
+#define HDR_IMG_TYPE_WOLFBOOT   0x0000   /* bootloader update */
+#define HDR_IMG_TYPE_APP        0x0001   /* application firmware */
+#define HDR_IMG_TYPE_DIFF       0x00D0   /* delta/incremental update */
+```
+
+### `wolfBoot_image` struct
+
+The bootloader populates one of these structures when it opens a partition for verification:
+
+```c
+struct wolfBoot_image {
+    uint8_t  *hdr;           /* pointer to the manifest header */
+    uint8_t  *trailer;       /* pointer to the partition trailer */
+    uint8_t  *sha_hash;      /* pointer to the hash TLV value */
+    uint8_t  *fw_base;       /* pointer to the firmware binary */
+    uint32_t  fw_size;       /* size of the firmware binary */
+    uint32_t  part;          /* PART_BOOT or PART_UPDATE */
+    uint32_t  hdr_ok;        /* header parsed successfully */
+    uint32_t  signature_ok;  /* signature verified */
+    uint32_t  sha_ok;        /* hash verified */
+};
+```
+
+## Adding custom TLV fields
+
+The `--custom-tlv` option on the signing tool inserts arbitrary fields into the header before the signature is computed. This means custom fields are covered by the signature and cannot be tampered with.
+
+```bash
+# Add a 4-byte custom field with tag 0x34 and value 0xAABBCCDD
+./tools/keytools/sign --ed25519 \
+    --custom-tlv 0x34 4 0xAABBCCDD \
+    test-app/image.bin \
+    wolfboot_signing_private_key.der 4
+```
+
+At runtime, read the field with `wolfBoot_find_header`:
+
+```c
+uint32_t  value;
+uint8_t  *ptr  = NULL;
+uint16_t  tlv  = 0x34;
+uint8_t  *hdr  = (uint8_t *)WOLFBOOT_PARTITION_BOOT_ADDRESS
+               + IMAGE_HEADER_OFFSET;
+
+uint16_t size = wolfBoot_find_header(hdr, tlv, &ptr);
+if (size > 0 && ptr != NULL) {
+    memcpy(&value, ptr, size);   /* value == 0xAABBCCDD */
+}
+```
+
+## Partition states
+
+A single status byte at the end of each partition records the lifecycle of the image it holds. The byte is initialized to `0xFF` (erased flash) and is written in one-way transitions that are safe across power failures.
+
+| State constant | Value | Valid in | Meaning |
+|---|---|---|---|
+| `IMG_STATE_NEW` | `0xFF` | BOOT, UPDATE | Image present but never staged for boot or update |
+| `IMG_STATE_UPDATING` | `0x70` | UPDATE only | Image is marked to replace the BOOT partition on next reboot |
+| `IMG_STATE_TESTING` | `0x10` | BOOT only | Image was just swapped in; awaiting confirmation from the application |
+| `IMG_STATE_SUCCESS` | `0x00` | BOOT only | Image confirmed successfully by the application |
+
+<Tip>
+  An image that remains in `IMG_STATE_TESTING` across a reboot is treated as
+  failed. wolfBoot initiates a rollback automatically by swapping the previous
+  firmware back from the UPDATE partition.
+</Tip>
+
+## How wolfBoot validates an image
+
+wolfBoot performs validation in a strict two-step sequence. Both steps must pass or the bootloader will not execute the image.
+
+<Steps>
+  <Step title="Hash verification">
+    wolfBoot recomputes the hash (SHA-256 by default) over the raw firmware
+    binary and compares it with the digest stored in the `HDR_SHA256` TLV tag.
+    A mismatch indicates corruption and the image is rejected immediately.
+  </Step>
+  <Step title="Signature verification">
+    Once integrity is confirmed, wolfBoot verifies the digital signature stored
+    in the `HDR_SIGNATURE` tag against the public key embedded in the
+    bootloader image at build time. The `HDR_PUBKEY` hint tag helps select the
+    correct key when multiple keys are provisioned.
+  </Step>
+</Steps>
+
+<Warning>
+  wolfBoot will never boot an image that fails either check. There is no
+  override or bypass mechanism in a production build.
+</Warning>
+
+<CardGroup cols={2}>
+  <Card title="Flash partitions" icon="hard-drive" href="/concepts/flash-partitions">
+    How BOOT, UPDATE, and SWAP partitions are laid out in flash.
+  </Card>
+  <Card title="Firmware update" icon="arrow-up-circle" href="/concepts/firmware-update">
+    The end-to-end update flow, rollback, and anti-rollback versioning.
+  </Card>
+</CardGroup>

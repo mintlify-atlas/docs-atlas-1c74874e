@@ -1,0 +1,232 @@
+---
+title: "Renesas Targets"
+description: "wolfBoot support for Renesas microcontrollers including RA6M4 (SCE hardware crypto), RX65N and RX72N (TSIP), and RZN2L (RSIP)."
+---
+
+wolfBoot supports four Renesas MCU families. All are developed and debugged using the **e2Studio** IDE. The RX family additionally supports command-line builds with the `rx-elf-gcc` toolchain. Each family integrates with Renesas' dedicated hardware security engine for key storage and cryptographic acceleration.
+
+| Family | Device | Security engine | IDE | Makefile build |
+|--------|--------|----------------|-----|---------------|
+| RA | RA6M4 | SCE (Secure Crypto Engine) | e2Studio | No |
+| RX | RX65N | TSIP (Trusted Secure IP) | e2Studio | Yes |
+| RX | RX72N | TSIP | e2Studio | Yes |
+| RZ | RZN2L | RSIP (Renesas Secure IP) | e2Studio | No |
+
+<Tabs>
+  <Tab title="RA6M4">
+
+## Renesas RA6M4
+
+The RA6M4 uses wolfBoot to perform secure firmware updates. Both application version 1 and version 2 are compiled in e2Studio and downloaded using the Renesas Flash Programmer.
+
+### Flash allocation
+
+```
+0x00000000: wolfBoot
+0x00010000: Primary partition header
+0x00010200: Primary partition application image
+0x00080000: Update partition header
+0x00080200: Update partition application image
+0x000F0000: Swap sector
+```
+
+### Hardware crypto: SCE
+
+The Renesas Secure Crypto Engine (SCE) provides hardware-accelerated cryptographic operations. Enable SCE support by following the setup steps in `IDE/Renesas/e2studio/RA6M4/Readme_withSCE.md`.
+
+### Development workflow
+
+<Steps>
+  <Step title="Open the e2Studio project">
+    Import the wolfBoot project from `IDE/Renesas/e2studio/RA6M4/`.
+  </Step>
+  <Step title="Build wolfBoot and the test application">
+    Build both the bootloader and app projects in e2Studio.
+  </Step>
+  <Step title="Download with Renesas Flash Programmer">
+    Use Renesas Flash Programmer to write wolfBoot and the signed application image to flash.
+  </Step>
+  <Step title="Debug via e2Studio">
+    Use the e2Studio debugger with the E2 Lite or J-Link emulator.
+  </Step>
+</Steps>
+
+Detailed step-by-step instructions are in `IDE/Renesas/e2studio/RA6M4/Readme.md`.
+
+  </Tab>
+  <Tab title="RX65N">
+
+## Renesas RX65N
+
+Tested boards:
+- RX65N-2MB-Starter-Kit-Plus (RSK+)
+- RX65N Target Board (RTK5RX65N0C00000BR) — includes onboard E2 Lite emulator
+
+### Flash memory layout (2 MB, 32 KB sector)
+
+| Description | Address | Size |
+|-------------|---------|------|
+| OFSM Option Memory | `0xFE7F5D00` | 128 B |
+| Application (boot) | `0xFFE00000` | 960 KB |
+| Update partition | `0xFFEF0000` | 960 KB |
+| Swap sector | `0xFFFE0000` | 64 KB |
+| wolfBoot | `0xFFFF0000` | 64 KB |
+
+### Build
+
+The RX build requires the Renesas RX-ELF GCC toolchain. Download from `https://llvm-gcc-renesas.com/rx-download-toolchains/`.
+
+```bash
+cp ./config/examples/renesas-rx65n.config .config
+make
+# or with explicit compiler path:
+make RX_GCC_PATH="~/toolchains/gcc_8.3.0.202311_rx_elf"
+```
+
+To enable TSIP hardware crypto:
+
+```bash
+make PKA=1
+```
+
+### Flash
+
+```bash
+rfp-cli -if fine -t e2l -device RX65x -auto \
+    -auth id FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF \
+    -bin FFFF0000 wolfboot.bin \
+    -bin FFE00000 test-app/image_v1_signed.bin \
+    -run
+```
+
+Add `-endian big` for big-endian builds.
+
+### Endianness
+
+Switch to big-endian by writing the OFSM option register:
+
+```bash
+# Big endian
+rfp-cli -if fine -t e2l -device RX65x \
+    -auth id FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF \
+    -write32 0xFE7F5D00 0xFFFFFFF8
+```
+
+### TSIP key management
+
+TSIP uses wrapped keys that are tied to the device via the Renesas Security Key Management Tool (SKMT). See `docs/Renesas.md` for the full key wrapping workflow using the `skmt.exe` CLI.
+
+TSIP performance benchmarks (ECDSA verify):
+
+| Hardware | Clock | Algorithm | TSIP | Release (-Os) | Release (-O2) |
+|----------|-------|-----------|------|--------------|--------------|
+| RX72N | 240 MHz | ECDSA P384 | 17.26 ms | 441 ms | 313 ms |
+| RX72N | 240 MHz | ECDSA P256 | 2.73 ms | 135 ms | 107 ms |
+| RX65N | 120 MHz | ECDSA P384 | 18.57 ms | 2179 ms | 1831 ms |
+| RX65N | 120 MHz | ECDSA P256 | 2.95 ms | 602 ms | 517 ms |
+
+  </Tab>
+  <Tab title="RX72N">
+
+## Renesas RX72N
+
+Tested board: RX72N ENVISION KIT (HMI development kit, includes onboard E2 Lite emulator).
+
+Supports both Makefile builds and e2Studio. For e2Studio see `IDE/Renesas/e2studio/RX72N/Readme.md`.
+
+### Flash memory layout (4 MB, 32 KB sector)
+
+| Description | Address | Size |
+|-------------|---------|------|
+| OFSM Option Memory | `0xFE7F5D00` | 128 B |
+| Application (boot) | `0xFFC00000` | 1984 KB |
+| Update partition | `0xFFDF0000` | 1984 KB |
+| Swap sector | `0xFFFE0000` | 64 KB |
+| wolfBoot | `0xFFFF0000` | 64 KB |
+
+Default UART: SCI2 at P12-RXD2 / P13-TXD2. Enable with `DEBUG_UART=1`.
+
+### Build
+
+```bash
+cp ./config/examples/renesas-rx72n.config .config
+make
+# or with explicit compiler path:
+make RX_GCC_PATH="~/toolchains/gcc_8.3.0.202311_rx_elf"
+```
+
+To enable TSIP hardware crypto:
+
+```bash
+make PKA=1
+```
+
+### Flash
+
+```bash
+rfp-cli -if fine -t e2l -device RX72x -auto \
+    -auth id FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF \
+    -bin FFFF0000 wolfboot.bin \
+    -bin FFC00000 test-app/image_v1_signed.bin \
+    -run
+```
+
+### TSIP encrypted updates
+
+To enable encrypted firmware updates via TSIP, add `ENCRYPT=1` and `ENCRYPT_WITH_AES256=1` to your `.config`, then create a wrapped AES key using the SKMT tool. See `docs/Renesas.md` for the complete key wrapping and signing workflow.
+
+  </Tab>
+  <Tab title="RZN2L">
+
+## Renesas RZN2L
+
+The RZN2L example demonstrates secure firmware boot from external flash using wolfBoot with RSIP (Renesas Secure IP) hardware crypto.
+
+### Boot flow
+
+The RZN2L is configured for SPI boot mode with external flash on the evaluation board:
+
+1. wolfBoot (loader program) is copied to internal RAM (B-TCM) by the boot ROM.
+2. wolfBoot copies the application from external flash to System RAM.
+3. wolfBoot verifies integrity and authenticity of the application.
+4. If valid, wolfBoot jumps to the application entry point in RAM.
+
+Applications v1 and v2 behave identically except for LED blinking color: Red for v1, Yellow for v2.
+
+### Development
+
+All development is done through e2Studio:
+
+<Steps>
+  <Step title="Open the e2Studio project">
+    Import the wolfBoot RZN2L project from `IDE/Renesas/e2studio/RZN2L/`.
+  </Step>
+  <Step title="Build wolfBoot and application">
+    Build both projects in e2Studio. The RSIP hardware crypto integration requires the steps in `IDE/Renesas/e2studio/RZN2L/Readme_wRSIP.md`.
+  </Step>
+  <Step title="Flash the device">
+    Program the device via e2Studio or the Renesas Flash Programmer.
+  </Step>
+</Steps>
+
+Detailed instructions are in `IDE/Renesas/e2studio/RZN2L/Readme.md`.
+
+  </Tab>
+</Tabs>
+
+## Production protection recommendations (RX family)
+
+<AccordionGroup>
+  <Accordion title="Disable external serial programmer">
+    Set `SPCC.SPE = 0` to lock out the external serial programming interface.
+  </Accordion>
+  <Accordion title="Flash Access Window (FAW)">
+    Configure the FAW registers to restrict which flash regions can be read or programmed. Set `FAW.FSPR = 0` to enable access window protection (this is a one-way operation).
+  </Accordion>
+  <Accordion title="ROM Code Protection">
+    Set `ROMCODE.CODE[31:0] = 0x00000000` (ROM code protection 1) or `0x00000001` (ROM code protection 2) to prevent external code readout.
+  </Accordion>
+  <Accordion title="Trusted Memory (TM)">
+    Set `TMEF.TMEF[2:0] = b000` to prevent reading of flash blocks 8 and 9. Use these blocks to store keys or sensitive code.
+  </Accordion>
+</AccordionGroup>

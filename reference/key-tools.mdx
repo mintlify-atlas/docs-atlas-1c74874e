@@ -1,0 +1,391 @@
+---
+title: "Key tools reference"
+description: "Reference for the keygen and sign command-line tools used to manage wolfBoot cryptographic keys and sign firmware images."
+---
+
+wolfBoot ships two companion tools — `keygen` and `sign` — for use on a development machine or CI/CD server. They manage the key material embedded in the bootloader and produce signed firmware images that wolfBoot can authenticate at boot time.
+
+## Building the key tools
+
+<Tabs>
+  <Tab title="Linux / macOS">
+    Build from the wolfBoot root:
+
+    ```bash
+    make keytools
+    ```
+
+    Or build directly from the tools directory:
+
+    ```bash
+    make -C tools/keytools
+    ```
+
+    The resulting binaries are placed in `tools/keytools/`.
+  </Tab>
+  <Tab title="Windows (Visual Studio)">
+    Open the Visual Studio solution in:
+
+    ```
+    IDE/VisualStudio/wolfBootSignTool.vcxproj
+    ```
+
+    Build the project to produce `sign.exe` and `keygen.exe`.
+
+    <Note>
+    If you see an error about a missing `target.h`, generate it first by running `make` in the wolfBoot root with your `.config` in place. The file is required because it defines `WOLFBOOT_SECTOR_SIZE`, which is used for delta update calculations.
+    </Note>
+  </Tab>
+</Tabs>
+
+---
+
+## keygen
+
+`keygen` creates and manages the wolfBoot keystore — the set of public keys embedded in or provisioned to the bootloader that it uses to verify firmware signatures.
+
+### Usage
+
+```
+keygen [OPTIONS] [-g new-keypair.der] [-i existing-pubkey.der] [...]
+```
+
+The `-g` and `-i` flags can be repeated to build a keystore with multiple keys. All keys in a single keystore must share the same algorithm.
+
+### Algorithm selection
+
+Exactly one algorithm flag must be present:
+
+| Flag | Algorithm |
+|------|-----------|
+| `--ed25519` | Ed25519 |
+| `--ed448` | Ed448 |
+| `--ecc256` | ECDSA P-256 |
+| `--ecc384` | ECDSA P-384 |
+| `--ecc521` | ECDSA P-521 |
+| `--rsa2048` | RSA-2048 |
+| `--rsa3072` | RSA-3072 |
+| `--rsa4096` | RSA-4096 |
+| `--lms` | LMS/HSS (post-quantum) |
+| `--xmss` | XMSS/XMSS^MT (post-quantum) |
+| `--ml-dsa` | ML-DSA / Dilithium (post-quantum) |
+
+### Key input/output flags
+
+<ParamField path="-g privkey.der" type="flag">
+  Generate a new key pair, add the public key to the keystore, and save the private key to `privkey.der`. Can be specified multiple times to generate multiple key pairs in one invocation.
+</ParamField>
+
+<ParamField path="-i existing-pubkey.der" type="flag">
+  Import an existing public key from `existing-pubkey.der` into the keystore without generating a new private key. Use this when the private key is held externally (e.g., in an HSM or cloud key service).
+</ParamField>
+
+<ParamField path="--der" type="flag">
+  Save the generated private key in DER format. This is the format expected by the `sign` tool and required when using certificate chain verification (`CERT_CHAIN_VERIFY=1`).
+</ParamField>
+
+<ParamField path="--exportpubkey" type="flag">
+  Export the public key corresponding to the newly generated private key (from `-g`) to a separate DER file. Only effective when used with `-g`.
+</ParamField>
+
+<ParamField path="--nolocalkeys" type="flag">
+  Generate a keystore entry with zeroed key material. Used on platforms that look up keys by reference in an external store (such as wolfHSM) rather than embedding the key bytes directly in the keystore. Only effective when used with `-g`.
+</ParamField>
+
+<ParamField path="--no-overwrite" type="flag">
+  Exit without prompting if any output key file already exists. Prevents accidental overwriting of existing key files.
+</ParamField>
+
+### Output files
+
+Running `keygen` produces:
+
+| File | Description |
+|------|-------------|
+| `src/keystore.c` | C source file linked into the wolfBoot image. Contains all public keys. |
+| `keystore.img` | Binary keystore image for provisioning keys through an alternative storage path. |
+| `<privkey>.der` | Private key file for each `-g` argument (name is the argument value). |
+
+### Examples
+
+<CodeGroup>
+
+```bash Generate a new ECC-256 key pair
+./tools/keytools/keygen --ecc256 -g wolfboot_signing_private_key.der
+```
+
+```bash Import an existing RSA-2048 public key
+./tools/keytools/keygen --rsa2048 -i my_rsa_public.der
+```
+
+```bash Generate two ED25519 key pairs (multi-key keystore)
+./tools/keytools/keygen --ed25519 \
+  -g key1.der \
+  -g key2.der
+```
+
+```bash Generate key for wolfHSM (no local key material)
+./tools/keytools/keygen --ecc256 \
+  -g hsm_key_ref.der \
+  --exportpubkey \
+  --nolocalkeys
+```
+
+</CodeGroup>
+
+---
+
+## sign
+
+`sign` produces a signed firmware image by prepending a wolfBoot manifest header to the binary. The header contains the image version, length, hash, and cryptographic signature.
+
+### Usage
+
+```
+sign [OPTIONS] IMAGE.BIN KEY.DER VERSION
+```
+
+| Argument | Description |
+|----------|-------------|
+| `IMAGE.BIN` | Raw binary firmware image to sign |
+| `KEY.DER` | Private key in DER format (or public key when using `--sha-only` or `--manual-sign`) |
+| `VERSION` | Firmware version number (positive integer, e.g., `1`, `2`, `42`) |
+
+The output file is named `<image>_v<VERSION>_signed.bin` in the same directory as `IMAGE.BIN`.
+
+### Algorithm flags
+
+If no algorithm flag is given, the tool attempts to detect the key type from `KEY.DER`. Specifying the flag explicitly is recommended.
+
+| Flag | Algorithm |
+|------|-----------|
+| `--ed25519` | Ed25519 |
+| `--ed448` | Ed448 |
+| `--ecc256` | ECDSA P-256 |
+| `--ecc384` | ECDSA P-384 |
+| `--ecc521` | ECDSA P-521 |
+| `--rsa2048` | RSA-2048 |
+| `--rsa3072` | RSA-3072 |
+| `--rsa4096` | RSA-4096 |
+| `--lms` | LMS/HSS |
+| `--xmss` | XMSS/XMSS^MT |
+| `--no-sign` | Disable signing (no `KEY.DER` argument needed) |
+
+### Hash flags
+
+<ParamField path="--sha256" type="flag" default="true">
+  Use SHA-256 for the image digest. Default when no hash flag is specified.
+</ParamField>
+
+<ParamField path="--sha384" type="flag">
+  Use SHA-384 for the image digest.
+</ParamField>
+
+<ParamField path="--sha3" type="flag">
+  Use SHA3-384 for the image digest. Required for Ed448 and ML-DSA.
+</ParamField>
+
+### Encryption flags
+
+<ParamField path="--encrypt SHAREDKEY.BIN" type="flag">
+  Encrypt the image using a pre-shared symmetric key file. The encryption algorithm defaults to ChaCha20 unless an explicit cipher flag is also provided.
+
+  | Flag | Algorithm | Key file size |
+  |------|-----------|---------------|
+  | `--chacha` (default) | ChaCha20 | 44 bytes (32-byte key + 12-byte IV) |
+  | `--aes128` | AES-128-CTR | 32 bytes (16-byte key + 16-byte IV) |
+  | `--aes256` | AES-256-CTR | 48 bytes (32-byte key + 16-byte IV) |
+</ParamField>
+
+### Delta update flags
+
+<ParamField path="--delta BASE_SIGNED_IMG.BIN" type="flag">
+  Create a binary diff (delta) update between `BASE_SIGNED_IMG.BIN` (the currently running signed image) and the new image. The output is stored in a file ending in `_signed_diff.bin`. Uses Bentley-McIlroy compression.
+
+  Requires `DELTA_UPDATES=1` at wolfBoot compile time.
+</ParamField>
+
+<ParamField path="--no-base-sha" type="flag">
+  Omit the SHA digest of the base image from the delta manifest header. Use only when the existing installation does not have space for the extra 32–48 bytes in the header.
+</ParamField>
+
+### Custom manifest fields
+
+<ParamField path="--custom-tlv tag len val" type="flag">
+  Add a TLV (type-length-value) field to the manifest header. `tag` is a 16-bit number in the range `0x0030`–`0xFEFE`. `val` can be a decimal or hex (`0x`-prefixed) number of `len` bytes.
+
+  ```bash
+  ./tools/keytools/sign --ecc256 --sha256 \
+    --custom-tlv 0x0030 4 0xDEADBEEF \
+    image.bin key.der 1
+  ```
+</ParamField>
+
+<ParamField path="--custom-tlv-buffer tag hexvalue" type="flag">
+  Add an arbitrary-length TLV field using a hex string value. Length is implicit.
+
+  ```bash
+  --custom-tlv-buffer 0x0031 AABBCCDDEE
+  ```
+</ParamField>
+
+<ParamField path="--custom-tlv-string tag ascii-string" type="flag">
+  Add an arbitrary-length TLV field using a plain ASCII string value.
+
+  ```bash
+  --custom-tlv-string 0x0032 "v2.1.0-release"
+  ```
+</ParamField>
+
+### Partition and header flags
+
+<ParamField path="--id N" type="flag" default="1">
+  Set the target partition ID in the manifest header. ID 1 is the default application partition. ID 0 is reserved for wolfBoot self-update images.
+</ParamField>
+
+<ParamField path="--wolfboot-update" type="flag">
+  Mark the image as a wolfBoot self-update package. Equivalent to `--id 0`.
+</ParamField>
+
+<ParamField path="--header-only" type="flag">
+  Emit only the manifest header without appending the firmware binary. Useful for externally persisting wolfBoot's own measurement header.
+
+  ```bash
+  ./tools/keytools/sign --wolfboot-update --header-only wolfboot.bin key.der 1
+  # Output: wolfboot_v1_header.bin
+  ```
+</ParamField>
+
+### External signing (HSM / three-step workflow)
+
+When the private key is not directly accessible, signing can be split into three phases:
+
+<Steps>
+  <Step title="Generate the digest">
+    Use `--sha-only` with the **public** key. The tool outputs an intermediate `*_digest.bin` file containing the portion of the manifest that must be signed.
+
+    ```bash
+    ./tools/keytools/sign --rsa2048 --sha-only --sha256 \
+      image.bin rsa2048_pub.der 1
+    # Produces: image_v1_digest.bin
+    ```
+  </Step>
+  <Step title="Sign the digest externally">
+    Pass `image_v1_digest.bin` to your HSM or signing service. Export the raw signature bytes to a file (e.g., `image_v1.sig`).
+
+    ```bash
+    # Example using OpenSSL as a stand-in for an HSM
+    openssl pkeyutl -sign -keyform der -inkey my_key.der \
+      -in image_v1_digest.bin > image_v1.sig
+    ```
+  </Step>
+  <Step title="Assemble the final image">
+    Use `--manual-sign` with the public key and the signature file to produce the final authenticated binary.
+
+    ```bash
+    ./tools/keytools/sign --rsa2048 --sha256 --manual-sign \
+      image.bin rsa2048_pub.der 1 image_v1.sig
+    # Produces: image_v1_signed.bin
+    ```
+  </Step>
+</Steps>
+
+### Version format
+
+`VERSION` is a plain positive integer. wolfBoot rejects updates with a version number lower than the currently running firmware unless `ALLOW_DOWNGRADE=1` is set at compile time.
+
+```bash
+# Version 1 — initial release
+./tools/keytools/sign --ecc256 --sha256 image.bin key.der 1
+
+# Version 2 — update
+./tools/keytools/sign --ecc256 --sha256 image.bin key.der 2
+```
+
+### Overriding the header size
+
+The manifest header size is computed automatically based on the selected algorithm. To override it, set the `IMAGE_HEADER_SIZE` environment variable:
+
+```bash
+IMAGE_HEADER_SIZE=2048 ./tools/keytools/sign --rsa4096 --sha256 image.bin key.der 1
+```
+
+---
+
+## Examples
+
+<AccordionGroup>
+  <Accordion title="Basic Ed25519 signing">
+    Generate a key pair and sign a firmware image at version 1:
+
+    ```bash
+    # Generate key pair
+    ./tools/keytools/keygen --ed25519 -g wolfboot_signing_private_key.der
+
+    # Sign the image
+    ./tools/keytools/sign --ed25519 --sha256 \
+      test-app/image.bin wolfboot_signing_private_key.der 1
+    # Output: test-app/image_v1_signed.bin
+    ```
+  </Accordion>
+
+  <Accordion title="RSA-2048 signing with SHA-256">
+    ```bash
+    ./tools/keytools/sign --rsa2048 --sha256 \
+      test-app/image.bin wolfboot_signing_private_key.der 1
+    ```
+  </Accordion>
+
+  <Accordion title="ECC-256 signing with ChaCha20 encryption">
+    ```bash
+    # Generate a 44-byte symmetric key
+    dd if=/dev/urandom bs=44 count=1 of=chacha_key.bin
+
+    ./tools/keytools/sign --ecc256 --sha256 \
+      --encrypt chacha_key.bin \
+      test-app/image.bin wolfboot_signing_private_key.der 2
+    # Output: test-app/image_v2_signed.bin (encrypted)
+    ```
+  </Accordion>
+
+  <Accordion title="Delta update signing">
+    Create an incremental update from version 1 to version 2:
+
+    ```bash
+    ./tools/keytools/sign --ecc256 --sha256 \
+      --delta test-app/image_v1_signed.bin \
+      test-app/image.bin wolfboot_signing_private_key.der 2
+    # Output: test-app/image_v2_signed_diff.bin
+    ```
+  </Accordion>
+
+  <Accordion title="Signing with an external RSA key (HSM workflow)">
+    Full three-step workflow for when the private key lives in an HSM:
+
+    ```bash
+    # Extract public key from DER private key
+    openssl rsa -inform DER -outform DER \
+      -in my_key.der -out rsa2048_pub.der -pubout
+
+    # Import public key into wolfBoot keystore
+    ./tools/keytools/keygen --rsa2048 -i rsa2048_pub.der
+
+    # Phase 1: generate digest
+    ./tools/keytools/sign --rsa2048 --sha-only --sha256 \
+      test-app/image.bin rsa2048_pub.der 1
+
+    # Phase 2: sign with HSM (example using OpenSSL)
+    openssl pkeyutl -sign -keyform der -inkey my_key.der \
+      -in test-app/image_v1_digest.bin > test-app/image_v1.sig
+
+    # Phase 3: assemble final image
+    ./tools/keytools/sign --rsa2048 --sha256 --manual-sign \
+      test-app/image.bin rsa2048_pub.der 1 test-app/image_v1.sig
+
+    # Combine wolfBoot + signed image into a factory binary
+    tools/bin-assemble/bin-assemble factory.bin \
+      0x0 wolfboot.bin \
+      0xc0000 test-app/image_v1_signed.bin
+    ```
+  </Accordion>
+</AccordionGroup>

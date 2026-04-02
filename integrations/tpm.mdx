@@ -1,0 +1,212 @@
+---
+title: "TPM integration"
+description: "Use a Trusted Platform Module (TPM) with wolfBoot for hardware root of trust, cryptographic offloading, measured boot, and sealed secret storage."
+---
+
+wolfBoot integrates with [wolfTPM](https://github.com/wolfSSL/wolfTPM) to provide TPM 2.0-based security features: hardware root of trust, cryptographic signature verification offloaded to the TPM, measured boot via PCR extension, and sealing/unsealing secrets under a PCR policy.
+
+## Build options
+
+| Makefile option | Preprocessor macro | Description |
+|---|---|---|
+| `WOLFTPM=1` | `WOLFBOOT_TPM` | Enables wolfTPM support |
+| `WOLFBOOT_TPM_VERIFY=1` | `WOLFBOOT_TPM_VERIFY` | Offloads RSA2048 and ECC256/384 signature verification to the TPM |
+| `WOLFBOOT_TPM_KEYSTORE=1` | `WOLFBOOT_TPM_KEYSTORE` | Enables TPM-based root of trust; an NV index must store a hash of the trusted public key |
+| `WOLFBOOT_TPM_KEYSTORE_NV_BASE=0x1400200` | `WOLFBOOT_TPM_KEYSTORE_NV_BASE` | NV index in platform range `0x1400000`–`0x17FFFFF` (default `0x01400200`) |
+| `WOLFBOOT_TPM_KEYSTORE_AUTH=secret` | `WOLFBOOT_TPM_KEYSTORE_AUTH` | Password for NV access |
+| `MEASURED_BOOT=1` | `WOLFBOOT_MEASURED_BOOT` | Extends a PCR with a hash of the wolfBoot bootloader code |
+| `MEASURED_PCR_A=16` | `WOLFBOOT_MEASURED_PCR_A` | PCR index to use for measured boot (see [measured boot](/security/measured-boot)) |
+| `MEASURED_BOOT_APP_PARTITION=1` | `WOLFBOOT_MEASURED_BOOT_APP_PARTITION` | Legacy: measure the boot (application) partition instead of wolfBoot code |
+| `WOLFBOOT_TPM_SEAL=1` | `WOLFBOOT_TPM_SEAL` | Enables sealing/unsealing secrets based on a PCR policy signed externally |
+| `WOLFBOOT_TPM_SEAL_NV_BASE=0x01400300` | `WOLFBOOT_TPM_SEAL_NV_BASE` | Overrides the default sealed blob NV storage location in the platform hierarchy |
+| `WOLFBOOT_TPM_SEAL_AUTH=secret` | `WOLFBOOT_TPM_SEAL_AUTH` | Password for sealing/unsealing; if omitted, only the PCR policy is used |
+
+## Root of trust
+
+The TPM root of trust (ROT) design stores a hash of the trusted public key in a platform NV handle that has been locked. wolfBoot reads the hash from the NV index at boot and compares it against the public key in the firmware header. A derived authentication value (encrypted on the bus) prevents TPM bus-level tampering.
+
+<Steps>
+  <Step title="Write the ROT NV entry">
+    Use the `rot` tool to provision the NV index with the public key hash. Pass `-auth` to set a bus-level authentication value.
+
+    ```bash
+    make tpmtools
+    ./tools/tpm/rot -write [-auth=TestAuth]
+    ```
+  </Step>
+  <Step title="Build wolfBoot with keystore enabled">
+    ```bash
+    make WOLFBOOT_TPM_KEYSTORE=1 [WOLFBOOT_TPM_KEYSTORE_AUTH=TestAuth]
+    ```
+  </Step>
+</Steps>
+
+<Note>
+See the [wolfTPM ROT example](https://github.com/wolfSSL/wolfTPM/tree/master/examples/boot) for a complete reference implementation.
+</Note>
+
+## Cryptographic offloading
+
+When `WOLFBOOT_TPM_VERIFY=1` is set, RSA2048 and ECC256/384 signature verification is offloaded to the TPM. This reduces bootloader code size and can improve verification performance on constrained targets.
+
+<Warning>
+The TPM's RSA verify requires ASN.1 DER encoding. Use `SIGN=RSA2048ENC` (not `RSA2048`) when enabling TPM-based RSA verification.
+</Warning>
+
+## Measured boot
+
+With `MEASURED_BOOT=1`, wolfBoot hashes its own code region (from the `_start_text` to `_stored_data` linker symbols) and extends the result into the PCR specified by `MEASURED_PCR_A`. The application can later read this PCR to verify the boot chain was not tampered with.
+
+The exposed API is:
+
+```c
+int wolfBoot_tpm2_extend(uint8_t pcrIndex, uint8_t* hash, int line);
+```
+
+A convenience macro is also available:
+
+```c
+/* Extends WOLFBOOT_MEASURED_PCR_A with hash, recording source line */
+measure_boot(hash);
+```
+
+To use the legacy behavior — measuring the application partition instead of wolfBoot itself — set `MEASURED_BOOT_APP_PARTITION=1`.
+
+## Sealing and unsealing secrets
+
+Sealing binds a secret to a set of known PCR values. The PCR policy must be signed externally and embedded in the firmware image header via the `--policy` argument of the sign tool. If no signed policy is present in the header, wolfBoot prints the current PCR values and policy digest for you to sign.
+
+### Seal/unseal API
+
+```c
+int wolfBoot_seal_auth(const uint8_t* pubkey_hint, const uint8_t* policy,
+    uint16_t policySz, int index, const uint8_t* secret, int secret_sz,
+    const uint8_t* auth, int authSz);
+
+int wolfBoot_unseal_auth(const uint8_t* pubkey_hint, const uint8_t* policy,
+    uint16_t policySz, int index, uint8_t* secret, int* secret_sz,
+    const uint8_t* auth, int authSz);
+```
+
+For `wolfBoot_unseal_auth()`, set `*secret_sz` to the capacity of the `secret` buffer before calling. On success it is updated to the number of bytes unsealed.
+
+Sealed blobs are stored to NV at `(WOLFBOOT_TPM_SEAL_NV_BASE + index)`. The default base is `0x01400300`.
+
+### Testing seal/unseal with the simulator
+
+```bash
+cp config/examples/sim-tpm-seal.config .config
+make keytools
+make tpmtools
+
+echo aaa > aaa.bin
+echo bbb > bbb.bin
+./tools/tpm/pcr_extend 0 aaa.bin
+./tools/tpm/pcr_extend 1 bbb.bin
+
+# PCR policy hash order: PCR 1 then PCR 0
+./tools/tpm/policy_create -pcr=1 -pcr=0 -out=policy.bin
+
+# If ROT is enabled, write the NV entry first
+./tools/tpm/rot -write [-auth=TestAuth]
+
+make clean
+make POLICY_FILE=policy.bin [WOLFBOOT_TPM_KEYSTORE_AUTH=TestAuth] [WOLFBOOT_TPM_SEAL_AUTH=SealAuth]
+
+./wolfboot.elf get_version
+```
+
+### Getting PCR values on hardware
+
+If no signed policy exists in the header, wolfBoot generates and prints the active PCRs and the policy digest:
+
+```bash
+./tools/tpm/rot -write
+./tools/tpm/pcr_reset 16
+./wolfboot.elf get_version
+```
+
+The output includes a hex-encoded PCR mask and policy digest:
+
+```
+PCR Mask (0x00010000) and PCR Policy Digest (36 bytes):
+0000010034ba061436aba2e9a167a1ee46af4a9578a8c6b9f71fdece21607a0cb40468ec
+Use this policy with the sign tool (--policy arg) or POLICY_FILE config
+```
+
+Convert the digest to a binary file:
+
+```bash
+echo "0000010034ba061436aba2e9a167a1ee46af4a9578a8c6b9f71fdece21607a0cb40468ec" \
+  | xxd -r -p > policy.bin
+```
+
+Or generate it directly with `policy_create`:
+
+```bash
+./tools/tpm/policy_create \
+  -pcr=16 \
+  -pcrdigest=f84085631f85333ad0338b06c82f16888b7923abaccffb881d5416e389be256c \
+  -out=policy.bin
+```
+
+### Signing the PCR policy
+
+<Tabs>
+  <Tab title="Build with POLICY_FILE">
+    Pass the policy binary at build time to automatically include the signed policy in the firmware header:
+
+    ```bash
+    make POLICY_FILE=policy.bin
+    ```
+  </Tab>
+  <Tab title="policy_sign tool">
+    Sign the policy digest directly — no TPM required:
+
+    ```bash
+    ./tools/tpm/policy_sign \
+      -pcr=0 \
+      -pcrdigest=eca4e8eda468b8667244ae972b8240d3244ea72341b2bf2383e79c66643bbecc
+    ```
+
+    Output is written to `policy.bin.sig` as a 32-bit PCR mask followed by the signature.
+  </Tab>
+  <Tab title="sign tool">
+    Use the standard sign tool with `--policy` to embed the signed policy in the firmware image:
+
+    ```bash
+    ./tools/keytools/sign --ecc256 --policy policy.bin \
+      test-app/image.elf wolfboot_signing_private_key.der 1
+    ```
+  </Tab>
+</Tabs>
+
+## TPM NV key storage
+
+wolfBoot uses NV indices in the TPM platform hierarchy for key storage:
+
+| Purpose | Default NV base | Config override |
+|---|---|---|
+| Root of trust key hash | `0x01400200` | `WOLFBOOT_TPM_KEYSTORE_NV_BASE` |
+| Sealed secret blobs | `0x01400300` | `WOLFBOOT_TPM_SEAL_NV_BASE` |
+
+NV indices must reside in the platform range `0x1400000`–`0x17FFFFF`. Each sealed blob is stored at `(base + index)`, so multiple secrets can coexist.
+
+## Supported TPM hardware
+
+wolfBoot uses wolfTPM, which supports any TPM 2.0-compliant device over SPI or I2C. Tested hardware includes:
+
+<CardGroup cols={2}>
+  <Card title="Infineon SLB9670 / SLB9672" icon="microchip" href="https://github.com/wolfSSL/wolfTPM">
+    SPI-attached TPM 2.0 modules widely available on Raspberry Pi HATs and embedded carrier boards.
+  </Card>
+  <Card title="ST ST33KTPM2XSPI" icon="microchip" href="https://github.com/wolfSSL/wolfTPM">
+    ST Microelectronics TPM 2.0 over SPI, commonly found on STM32 evaluation boards.
+  </Card>
+  <Card title="Microchip ATTPM20" icon="microchip" href="https://github.com/wolfSSL/wolfTPM">
+    Microchip TPM 2.0 I2C device suitable for space-constrained designs.
+  </Card>
+  <Card title="Software TPM simulator (IBM)" icon="computer" href="https://github.com/wolfSSL/wolfTPM">
+    IBM Software TPM for simulation and CI testing without physical hardware.
+  </Card>
+</CardGroup>

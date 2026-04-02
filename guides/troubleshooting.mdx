@@ -1,0 +1,160 @@
+---
+title: 'Troubleshooting'
+description: 'Solutions to common build, signing, and configuration problems encountered with wolfBoot.'
+---
+
+<AccordionGroup>
+  <Accordion title="Python errors when signing (wolfcrypt-py version mismatch)">
+
+If you see either of these tracebacks when running `keygen.py` or `sign.py`:
+
+```text
+Traceback (most recent call last):
+  File "tools/keytools/keygen.py", line 135, in <module>
+    rsa = ciphers.RsaPrivate.make_key(2048)
+AttributeError: type object 'RsaPrivate' has no attribute 'make_key'
+```
+
+```text
+Traceback (most recent call last):
+  File "tools/keytools/sign.py", line 189, in <module>
+    r, s = ecc.sign_raw(digest)
+AttributeError: 'EccPrivate' object has no attribute 'sign_raw'
+```
+
+Your installed version of `wolfcrypt-py` is outdated. Install the latest version:
+
+```bash
+pip3 install wolfcrypt
+```
+
+Alternatively, build and install from a local wolfSSL source tree:
+
+```bash
+cd wolfssl
+./configure --enable-keygen --enable-rsa --enable-ecc --enable-ed25519 \
+  --enable-des3 CFLAGS="-DFP_MAX_BITS=8192 -DWOLFSSL_PUBLIC_MP"
+make
+sudo make install
+
+cd wolfcrypt-py
+USE_LOCAL_WOLFSSL=/usr/local pip3 install .
+```
+
+  </Accordion>
+
+  <Accordion title="Key algorithm mismatch">
+
+```text
+Key algorithm mismatch. Remove old keys via 'make keysclean'
+```
+
+The `SIGN` algorithm in your current `.config` does not match the algorithm used to generate the keys in `src/keystore.c`. This happens when you switch signing algorithms without regenerating keys.
+
+Run the following to delete the stale keys and let the build regenerate them:
+
+```bash
+make keysclean
+make
+```
+
+  </Accordion>
+
+  <Accordion title="Cannot open compiler generated file / Permission denied">
+
+```text
+sp_c32.c : fatal error C1083: Cannot open compiler generated file:
+'... sp_c32.obj': Permission denied
+```
+
+This typically happens when:
+
+- Multiple build environments or IDE instances are open at the same time and locking output files.
+- Anti-virus software is scanning or locking intermediate build files.
+
+**Steps to resolve:**
+
+<Steps>
+  <Step title="Close all open IDE instances and terminals running the build." />
+  <Step title="Manually delete the affected build directory." />
+  <Step title="Temporarily disable real-time anti-virus scanning for the build directory, or add the directory to the exclusion list." />
+  <Step title="Restart your IDE and retry the build." />
+</Steps>
+
+  </Accordion>
+
+  <Accordion title="Unresolved external symbol __imp____acrt_iob_func">
+
+```text
+unresolved external symbol __imp____acrt_iob_func referenced in function _main
+```
+
+This linker error occurs on Windows when the object files were compiled against a different C runtime than the one being linked. It is most commonly caused by mixing compiler versions or linking a library built with an older MSVC runtime.
+
+Ensure all source files and dependencies are compiled with the same Visual Studio toolchain version. If you are using the wolfBoot key tools, build them from source using the same compiler rather than using pre-built binaries.
+
+  </Accordion>
+
+  <Accordion title="expected expression before ';' around WOLFBOOT_PARTITION_BOOT_ADDRESS">
+
+```text
+/src/libwolfboot.c:724:64: error: expected expression before ';' token
+  724 |             address = (uint32_t)WOLFBOOT_PARTITION_BOOT_ADDRESS;
+```
+
+This error means `WOLFBOOT_PARTITION_BOOT_ADDRESS` is defined as an empty macro — it has no value. A failed or incomplete configuration run can leave a bad `target.h` with empty `#define` lines.
+
+**Steps to resolve:**
+
+<Steps>
+  <Step title="Locate the generated target.h file and search for a line like:">
+
+```c
+#define WOLFBOOT_PARTITION_BOOT_ADDRESS
+```
+
+The value after the macro name should be a hex address. If the line has no value, the file is corrupt.
+
+  </Step>
+  <Step title="Rename the bad file with a .bak extension so the build can regenerate it:">
+
+```bash
+mv target.h target.h.bak
+```
+
+  </Step>
+  <Step title="Delete the entire build directory for a clean state, then rebuild:">
+
+```bash
+make clean
+make
+```
+
+  </Step>
+</Steps>
+
+  </Accordion>
+
+  <Accordion title="stdint.h (or stdio.h) No such file or directory">
+
+```text
+\wolfBoot\tools\keytools\sign.c(33): fatal error C1083:
+Cannot open include file: 'stdio.h': No such file or directory
+```
+
+The host C compiler cannot find standard library headers. On Windows this almost always means the Visual Studio Developer Command Prompt has not been activated.
+
+**Steps to resolve:**
+
+<Steps>
+  <Step title="Open a Visual Studio Developer Command Prompt (not a regular Command Prompt or PowerShell window). Find it in the Start menu under your Visual Studio installation." />
+  <Step title="Re-run the build from that prompt." />
+  <Step title="If the error persists, check the HOST_CC variable in the build logs and verify that the compiler listed matches the one activated in the developer prompt. The search order is controlled by PREFERRED_HOST_CC_NAME_LIST." />
+</Steps>
+
+<Note>
+On Linux and macOS this error usually means the system headers package is not installed. Install `gcc` or the platform SDK (e.g. `sudo apt install build-essential` on Debian/Ubuntu, or Xcode Command Line Tools on macOS).
+</Note>
+
+  </Accordion>
+</AccordionGroup>

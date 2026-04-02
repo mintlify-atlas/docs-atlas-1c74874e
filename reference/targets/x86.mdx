@@ -1,0 +1,373 @@
+---
+title: "x86-64 Targets"
+description: "wolfBoot support for x86-64 platforms including Intel FSP (TigerLake, QEMU), QEMU UEFI EFI application mode, Kontron VX3060-S2, and advanced ARM64 targets Xilinx Zynq UltraScale+ and AMD Versal."
+---
+
+wolfBoot supports x86-64 platforms in two distinct modes: as a **UEFI application** staged by an existing UEFI BIOS, or as a **bare-metal BIOS replacement** using the Intel Firmware Support Package (FSP). This page also covers the advanced ARM64 SoC targets Xilinx Zynq UltraScale+ and AMD Versal, which share the same disk-based A/B update model.
+
+<Tabs>
+  <Tab title="QEMU UEFI">
+
+## QEMU UEFI (EFI application)
+
+In UEFI mode, wolfBoot is compiled as an EFI application (`wolfboot.efi`) and staged by an existing UEFI firmware (Tianocore/OVMF). This is the simplest x86 mode and requires no FSP binaries.
+
+**Example config:** `config/examples/x86_64_efi.config`
+
+### Prerequisites
+
+```bash
+apt install git make gcc sudo dosfstools curl
+apt install qemu qemu-system-x86 ovmf gnu-efi
+apt install file bzip2 g++ wget cpio unzip rsync bc
+```
+
+### Build and run on QEMU
+
+<Steps>
+  <Step title="Copy configuration and prepare EFI partition">
+    ```bash
+    cp config/examples/x86_64_efi.config .config
+    tools/efi/prepare_efi_partition.sh
+    ```
+  </Step>
+  <Step title="Build wolfBoot">
+    ```bash
+    make
+    ```
+    This produces `wolfboot.efi`.
+  </Step>
+  <Step title="Build and sign the Linux kernel images">
+    ```bash
+    tools/efi/compile_efi_linux.sh
+    ```
+    Two signed kernel images are created: `kernel.img` (version 1) and `update.img` (version 2).
+  </Step>
+  <Step title="Run on QEMU">
+    ```bash
+    tools/efi/run_efi.sh
+    ```
+    wolfBoot selects `update.img` (version 2) as the higher-version image.
+  </Step>
+</Steps>
+
+Expected output on boot:
+
+```
+Starting wolfBoot EFI...
+Image base: 0xE3C6000
+Opening file: kernel.img, size: 6658272
+Opening file: update.img, size: 6658272
+Active Part 1
+Firmware Valid
+Booting at 0D630000
+Staging kernel at address D630100, size: 6658016
+```
+
+  </Tab>
+  <Tab title="Intel FSP">
+
+## Intel FSP (bare-metal BIOS replacement)
+
+When built with FSP support, wolfBoot replaces the system BIOS entirely. It invokes Intel Firmware Support Package binaries (FSP-T, FSP-M, FSP-S) provided by the silicon vendor for memory init, silicon init, and power management, then performs secure firmware verification and boot.
+
+<Note>
+NASM must be installed on the build machine. Install with `apt install nasm` or the equivalent for your distribution.
+</Note>
+
+### Required `.config` variables
+
+| Variable | Description |
+|----------|-------------|
+| `ARCH` | Must be `x86_64` |
+| `TARGET` | Target name (e.g. `x86_fsp_qemu`, `kontron_vx3060_s2`) |
+| `FSP_T_BASE` | Load address for FSP-T binary |
+| `FSP_M_BASE` | Load address for FSP-M binary |
+| `FSP_S_BASE` | Load address for FSP-S binary |
+| `FSP_T_BIN` | Path to FSP-T binary blob |
+| `FSP_M_BIN` | Path to FSP-M binary blob |
+| `FSP_S_BIN` | Path to FSP-S binary blob |
+| `WOLFBOOT_ORIGIN` | wolfBoot start address in flash (flash maps to end of 4 GB) |
+| `BOOTLOADER_PARTITION_SIZE` | Size of the wolfBoot flash partition |
+| `WOLFBOOT_LOAD_BASE` | RAM address where wolfBoot is loaded after first init phase |
+
+### Two-stage boot model
+
+wolfBoot FSP builds use a two-stage model:
+
+1. **Stage 1** runs from flash (Cache-as-RAM). It calls FSP-T (Temp RAM), FSP-M (Memory Init), then copies stage 2 and wolfBoot to RAM.
+2. **Stage 2** (wolfBoot main) runs from RAM. It calls FSP-S (Silicon Init), enumerates PCI, detects AHCI/SATA disks, reads GPT partitions, verifies and boots the signed OS image from disk.
+
+Supported payload formats: ELF64, Multiboot2.
+
+  </Tab>
+  <Tab title="QEMU FSP">
+
+## Running wolfBoot FSP on QEMU
+
+**Example configs:**
+- `config/examples/x86_fsp_qemu.config` — basic FSP boot
+- `config/examples/x86_fsp_qemu_seal.config` — FSP boot + TPM seal/unseal
+
+### Basic boot
+
+<Steps>
+  <Step title="Copy configuration">
+    ```bash
+    cp config/examples/x86_fsp_qemu.config .config
+    ```
+  </Step>
+  <Step title="Build FSP binaries from edk2">
+    ```bash
+    ./tools/scripts/x86_fsp/qemu/qemu_build_fsp.sh
+    ```
+  </Step>
+  <Step title="Build wolfBoot">
+    ```bash
+    make
+    make test-app/image.elf
+    ```
+  </Step>
+  <Step title="Create hard disk image with signed application">
+    ```bash
+    IMAGE=test-app/image.elf tools/scripts/x86_fsp/qemu/make_hd.sh
+    ```
+  </Step>
+  <Step title="Run QEMU">
+    ```bash
+    ./tools/scripts/x86_fsp/qemu/qemu.sh
+    ```
+  </Step>
+</Steps>
+
+### TPM seal/unseal (swtpm)
+
+To test measured boot with a TPM emulator, install [swtpm](https://github.com/stefanberger/swtpm), then:
+
+```bash
+cp config/examples/x86_fsp_qemu_seal.config .config
+./tools/scripts/x86_fsp/qemu/qemu_build_fsp.sh
+make keytools && make tpmtools
+
+# Create two keys: ECC384 for image signing, ECC256 for TPM sealing
+./tools/keytools/keygen --force --ecc384 -g wolfboot_signing_private_key.der \
+    --ecc256 -g tpm_seal_key.key
+
+make CFLAGS_EXTRA="-DHAVE_ECC256"
+
+# Compute PCR0 value and sign the policy
+PCR0=$(python ./tools/scripts/x86_fsp/compute_pcr.py --target qemu wolfboot_stage1.bin | tail -n 1)
+./tools/tpm/policy_sign -ecc256 -key=tpm_seal_key.key -pcr=0 -pcrdigest=$PCR0
+./tools/scripts/x86_fsp/tpm_install_policy.sh policy.bin.sig
+
+make test-app/image.elf
+IMAGE=test-app/image.elf SIGN=--ecc384 tools/scripts/x86_fsp/qemu/make_hd.sh
+
+# Run with TPM emulation
+./tools/scripts/x86_fsp/qemu/qemu.sh -t
+```
+
+  </Tab>
+  <Tab title="Kontron VX3060-S2">
+
+## Kontron VX3060-S2 (Intel TigerLake FSP)
+
+wolfBoot supports the Kontron VX3060-S2 Intel TigerLake-based board using FSP. A dump of the original flash content is required to produce a flashable image.
+
+**Example config:** `config/examples/kontron_vx3060_s2.config`
+
+### Build
+
+```bash
+cp config/examples/kontron_vx3060_s2.config .config
+./tools/scripts/x86_fsp/tgl/tgl_download_fsp.sh
+make
+./tools/scripts/x86_fsp/tgl/assemble_image.sh -n /path/to/original/flash/dump
+```
+
+This produces `final_image.bin` which can be written directly to the board's SPI flash.
+
+### Disk layout
+
+wolfBoot reads the OS image from a GPT-partitioned SATA drive. Images must be written directly to partition 5 or 6 (no filesystem). Use `src/update_disk.c` as a reference for the partition selection logic.
+
+### Boot output (excerpt)
+
+```
+Cache-as-RAM initialized
+FSP-T:A.0.7E build 70
+FSP-M:A.0.7E build 70
+microcode revision: AA, date: 12-28-2022
+calling FspMemInit...
+success
+...
+wolfBoot: verified OK.
+starting wolfboot 64bit
+AHCI port 1: Disk detected (det: 03 ipm: 01)
+SATA disk drive detected on AHCI port 1
+...
+Versions, A:1 B:1
+Attempting boot from partition A
+```
+
+  </Tab>
+  <Tab title="Xilinx Zynq UltraScale+">
+
+## Xilinx Zynq UltraScale+ (ZCU102)
+
+Quad-core ARM Cortex-A53 (plus dual Cortex-R5). wolfBoot replaces U-Boot in the boot chain:
+
+```
+FSBL -> PMUFW -> BL31 (EL3) -> wolfBoot (EL2) -> Linux (EL1)
+```
+
+wolfBoot runs from DDR at `0x8000000` (EL2, non-secure). Clock, MIO, and DDR init is handled by FSBL/PMUFW.
+
+**Example configs:**
+- `config/examples/zynqmp.config` — QSPI boot
+- `config/examples/zynqmp_sdcard.config` — SD card boot (MBR, A/B partitions)
+
+### Prerequisites
+
+- Xilinx Vitis 2024.1 or newer (`export VITIS_PATH=/opt/Xilinx/Vitis/2024.1`)
+- `aarch64-none-elf-gcc` toolchain
+- Pre-built FSBL, PMUFW, BL31 from soc-prebuilt-firmware
+
+### Key build options
+
+| Option | Value |
+|--------|-------|
+| `ARCH` | `AARCH64` |
+| `TARGET` | `zynq` |
+| `SIGN` | `RSA4096` |
+| `HASH` | `SHA3` |
+| `ELF` | `1` |
+
+### QSPI boot
+
+```bash
+cp config/examples/zynqmp.config .config
+make clean && make
+```
+
+QSPI layout:
+
+| Partition | Size | Address |
+|-----------|------|---------|
+| wolfBoot (DDR load) | — | `0x8000000` |
+| Primary | 42 MB | `0x800000` |
+| Update | 42 MB | `0x3A00000` |
+| Swap | — | `0x63E0000` |
+
+Build `BOOT.BIN`:
+
+```bash
+cp ${PREBUILT_DIR}/zynqmp_fsbl.elf .
+cp ${PREBUILT_DIR}/pmufw.elf .
+cp ${PREBUILT_DIR}/bl31.elf .
+source ${VITIS_PATH}/settings64.sh
+bootgen -arch zynqmp -image ./IDE/XilinxSDK/boot.bif -w -o BOOT.BIN
+```
+
+Test with QEMU:
+
+```bash
+qemu-system-aarch64 -machine xlnx-zcu102 -cpu cortex-a53 \
+    -serial stdio -display none \
+    -device loader,file=wolfboot.bin,cpu-num=0
+```
+
+### SD card boot (MBR A/B)
+
+Uses the Arasan SDHCI controller (SD1 slot on ZCU102):
+
+| Partition | Size | Type | Contents |
+|-----------|------|------|----------|
+| 1 (boot) | 128 MB | FAT32, bootable | BOOT.BIN |
+| 2 (OFP_A) | 200 MB | Linux | Primary signed image |
+| 3 (OFP_B) | 200 MB | Linux | Update signed image |
+| 4 (rootfs) | remainder | Linux | Root filesystem |
+
+  </Tab>
+  <Tab title="AMD Versal VMK180">
+
+## AMD Versal Gen 1 VMK180
+
+Dual-core ARM Cortex-A72. wolfBoot replaces U-Boot:
+
+```
+PLM -> PSM -> BL31 (EL3) -> wolfBoot (EL2) -> Linux (EL1)
+```
+
+wolfBoot runs from DDR at `0x8000000` (EL2, non-secure).
+
+**Example configs:**
+- `config/examples/versal_vmk180.config` — QSPI boot
+- `config/examples/versal_vmk180_sdcard.config` — SD card boot
+
+### Key build options
+
+| Option | Value |
+|--------|-------|
+| `ARCH` | `AARCH64` |
+| `TARGET` | `versal` |
+| `WOLFBOOT_ORIGIN` | `0x8000000` |
+| `WOLFBOOT_SECTOR_SIZE` | `0x20000` (128 KB) |
+| `WOLFBOOT_PARTITION_SIZE` | `0x2C00000` (44 MB) |
+| `EXT_FLASH` | `1` |
+| `ELF` | `1` |
+
+### QSPI layout
+
+| Partition | Size | Address |
+|-----------|------|---------|
+| wolfBoot (DDR load) | — | `0x8000000` |
+| Primary | 44 MB | `0x800000` |
+| Update | 44 MB | `0x3400000` |
+| Swap | — | `0x6000000` |
+
+VMK180 uses dual parallel MT25QU01GBBB flash (256 MB total). The QSPI driver supports DMA mode, Quad SPI (4-bit), 4-byte addressing, hardware striping, and a 75 MHz default clock.
+
+### Build and flash
+
+```bash
+cp config/examples/versal_vmk180.config .config
+make clean && make
+
+# Build BOOT.BIN
+git clone --branch xlnx_rel_v2024.2 https://github.com/Xilinx/soc-prebuilt-firmware.git
+export PREBUILT_DIR=$(pwd)/../soc-prebuilt-firmware/vmk180-versal
+cp ${PREBUILT_DIR}/project_1.pdi .
+cp ${PREBUILT_DIR}/plm.elf .
+cp ${PREBUILT_DIR}/psmfw.elf .
+cp ${PREBUILT_DIR}/bl31.elf .
+source ${VITIS_PATH}/settings64.sh
+bootgen -arch versal -image ./tools/scripts/versal_boot.bif -w -o BOOT.BIN
+```
+
+### Booting PetaLinux
+
+wolfBoot supports booting a signed Linux kernel as a FIT image (`fitImage`):
+
+```bash
+mkimage -f hal/versal.its fitImage
+./tools/keytools/sign --ecc384 --sha384 fitImage wolfboot_signing_private_key.der 1
+```
+
+wolfBoot automatically fixes up the device tree `bootargs` before booting. The default root device is `/dev/mmcblk0p2`. Override with:
+
+```makefile
+CFLAGS_EXTRA+=-DLINUX_BOOTARGS_ROOT=\"/dev/mmcblk0p4\"
+```
+
+### Boot performance (ECC384/SHA384)
+
+| Operation | Time |
+|-----------|------|
+| Load 24 MB FIT from QSPI | ~700 ms |
+| SHA384 integrity check | ~167 ms |
+| ECC384 signature verify | ~3 ms |
+| **Total wolfBoot overhead** | **~870 ms** |
+
+  </Tab>
+</Tabs>

@@ -1,0 +1,270 @@
+---
+title: "Application API (libwolfboot)"
+description: "C API for interacting with wolfBoot from application firmware — trigger updates, confirm boot success, and query partition state."
+keywords: ["wolfBoot", "libwolfboot", "firmware update", "API", "partition", "TrustZone", "NSC"]
+---
+
+## Overview
+
+`libwolfboot` is the application-facing library that lets your firmware communicate with the wolfBoot bootloader. It provides functions to read firmware versions, trigger a pending update, and confirm that a newly-booted image is working correctly.
+
+Include the header in any source file that calls the API:
+
+```c
+#include <wolfboot/wolfboot.h>
+```
+
+Link your application against `libwolfboot.a` (or the equivalent object files built alongside the bootloader). The library is compiled from `src/libwolfboot.c` and requires the same `target.h` configuration used by the bootloader itself.
+
+<Note>
+`libwolfboot` is compiled separately from the bootloader binary. Both share the same `target.h` so that partition addresses and sector sizes stay in sync.
+</Note>
+
+---
+
+## Partition constants
+
+These constants identify which flash partition a function operates on. Pass them as the `part` argument to any function that accepts a partition ID.
+
+| Constant | Value | Description |
+|---|---|---|
+| `PART_BOOT` | `0` | Active (boot) partition — the currently running firmware. |
+| `PART_UPDATE` | `1` | Update partition — staging area for a new firmware image. |
+| `PART_SWAP` | `2` | Swap partition — single-sector scratch space used during image swap. |
+
+---
+
+## Partition state constants
+
+wolfBoot stores a state flag at the end of each partition's flash region. These values describe the lifecycle of the image in that partition.
+
+| Constant | Description |
+|---|---|
+| `IMG_STATE_NEW` | Partition has a valid image that has not been scheduled for boot or update. |
+| `IMG_STATE_UPDATING` | Update is pending; the bootloader will swap images on the next reboot. |
+| `IMG_STATE_TESTING` | Image was just swapped in and is running for the first time — boot success not yet confirmed. |
+| `IMG_STATE_SUCCESS` | Application explicitly confirmed a successful boot via `wolfBoot_success()`. |
+
+<Warning>
+If the bootloader finds `IMG_STATE_TESTING` in the boot partition on startup, it treats the previous update as failed and automatically rolls back by swapping the images again.
+</Warning>
+
+---
+
+## Functions
+
+### `wolfBoot_get_image_version`
+
+Returns the version number embedded in the firmware image header for the given partition.
+
+```c
+uint32_t wolfBoot_get_image_version(uint8_t part);
+```
+
+<ParamField path="part" type="uint8_t" required>
+  Partition to query. One of `PART_BOOT`, `PART_UPDATE`, or `PART_SWAP`.
+</ParamField>
+
+<ResponseField name="return" type="uint32_t">
+  The 32-bit version number stored in the image header, or `0` if no valid image is present in that partition.
+</ResponseField>
+
+---
+
+### `wolfBoot_current_firmware_version`
+
+Convenience macro that returns the version of the currently running firmware (the image in `PART_BOOT`).
+
+```c
+#define wolfBoot_current_firmware_version() \
+    wolfBoot_get_image_version(PART_BOOT)
+```
+
+<ResponseField name="return" type="uint32_t">
+  Version number of the active (boot) firmware image.
+</ResponseField>
+
+---
+
+### `wolfBoot_update_firmware_version`
+
+Convenience macro that returns the version of the staged update firmware (the image in `PART_UPDATE`).
+
+```c
+#define wolfBoot_update_firmware_version() \
+    wolfBoot_get_image_version(PART_UPDATE)
+```
+
+<ResponseField name="return" type="uint32_t">
+  Version number of the firmware image waiting in the update partition, or `0` if no update is staged.
+</ResponseField>
+
+---
+
+### `wolfBoot_update_trigger`
+
+Marks the update partition as ready to be applied and instructs the bootloader to perform the swap on the next reboot.
+
+```c
+void wolfBoot_update_trigger(void);
+```
+
+This function sets the update partition state to `IMG_STATE_UPDATING`. After calling it, the application should reboot. On the next boot, wolfBoot detects the `IMG_STATE_UPDATING` flag, swaps the contents of `PART_BOOT` and `PART_UPDATE`, and sets the boot partition state to `IMG_STATE_TESTING`.
+
+<Note>
+Call `wolfBoot_update_trigger()` only after the new firmware image has been fully written and verified in `PART_UPDATE`. Triggering with an incomplete or corrupt image will cause a rollback after the failed boot.
+</Note>
+
+---
+
+### `wolfBoot_success`
+
+Confirms that the current firmware booted and initialized successfully, permanently accepting the update.
+
+```c
+void wolfBoot_success(void);
+```
+
+This function sets the boot partition state from `IMG_STATE_TESTING` to `IMG_STATE_SUCCESS`. If the application reboots or crashes before calling `wolfBoot_success()`, wolfBoot sees the `IMG_STATE_TESTING` state on startup and reverts to the previous firmware.
+
+Call this function only after verifying that critical system features — networking, storage, sensor interfaces — are operating correctly.
+
+---
+
+### `wolfBoot_get_partition_state`
+
+Reads the current state flag of a partition directly from flash.
+
+```c
+int wolfBoot_get_partition_state(uint8_t part, uint8_t *st);
+```
+
+<ParamField path="part" type="uint8_t" required>
+  Partition to query. One of `PART_BOOT`, `PART_UPDATE`, or `PART_SWAP`.
+</ParamField>
+
+<ParamField path="st" type="uint8_t *" required>
+  Pointer to a `uint8_t` variable that receives the state value on success. Will be set to one of the `IMG_STATE_*` constants.
+</ParamField>
+
+<ResponseField name="return" type="int">
+  `0` on success. A negative value if the partition magic is missing or the state cannot be read.
+</ResponseField>
+
+---
+
+## Usage example: complete update flow
+
+The pattern below shows a typical update agent that downloads a new image, writes it into the update partition, then arms the swap and waits for a reboot. After rebooting into the new image, the application confirms success.
+
+```c
+#include <wolfboot/wolfboot.h>
+
+/* Phase 1: download and arm the update (runs in the current firmware) */
+void apply_firmware_update(void)
+{
+    uint32_t cur_ver  = wolfBoot_current_firmware_version();
+    uint32_t upd_ver  = wolfBoot_update_firmware_version();
+
+    if (upd_ver <= cur_ver) {
+        /* Nothing to do — staged image is not newer */
+        return;
+    }
+
+    /*
+     * At this point the new image has already been written sector-by-sector
+     * into PART_UPDATE by the download agent (not shown here).
+     *
+     * Arm the swap and reboot. wolfBoot will swap the images on next boot
+     * and set PART_BOOT state to IMG_STATE_TESTING.
+     */
+    wolfBoot_update_trigger();
+
+    /* Trigger a system reset — implementation is platform-specific */
+    system_reset();
+}
+
+/* Phase 2: confirm success (runs in the new firmware after reboot) */
+void startup_self_test(void)
+{
+    uint8_t state = 0;
+
+    wolfBoot_get_partition_state(PART_BOOT, &state);
+
+    if (state == IMG_STATE_TESTING) {
+        /*
+         * We are running a freshly swapped-in image.
+         * Run application-level checks before confirming.
+         */
+        if (network_is_reachable() && sensors_are_responding()) {
+            wolfBoot_success();   /* Accept the new image permanently */
+        } else {
+            /*
+             * Do NOT call wolfBoot_success().
+             * The next reboot will trigger an automatic rollback.
+             */
+        }
+    }
+}
+```
+
+---
+
+## NSC API (TrustZone non-secure callable wrappers)
+
+On ARM TrustZone-enabled targets (for example STM32U5), wolfBoot can keep the `PART_UPDATE` and `PART_SWAP` partitions in the secure domain while the application runs in the non-secure domain. The Non-Secure Callable (NSC) API provides wrappers that allow non-secure code to invoke bootloader operations through a secure gateway.
+
+Enable this feature by building with `TZEN=1`.
+
+<Note>
+NSC functions are only available when `TZEN=1` is defined at build time. They are declared in `include/wolfboot/wolfboot.h` and must not be called from secure-mode code.
+</Note>
+
+| NSC function | Wraps |
+|---|---|
+| `void wolfBoot_nsc_success(void)` | `wolfBoot_success()` |
+| `void wolfBoot_nsc_update_trigger(void)` | `wolfBoot_update_trigger()` |
+| `uint32_t wolfBoot_nsc_get_image_version(uint8_t part)` | `wolfBoot_get_image_version()` |
+| `uint32_t wolfBoot_nsc_current_firmware_version(void)` | `wolfBoot_current_firmware_version()` |
+| `uint32_t wolfBoot_nsc_update_firmware_version(void)` | `wolfBoot_update_firmware_version()` |
+| `int wolfBoot_nsc_get_partition_state(uint8_t part, uint8_t *st)` | `wolfBoot_get_partition_state()` |
+| `int wolfBoot_nsc_erase_update(uint32_t address, uint32_t len)` | Erases sectors in `PART_UPDATE` from non-secure context. `address` is an offset from the start of the update partition. |
+| `int wolfBoot_nsc_write_update(uint32_t address, const uint8_t *buf, uint32_t len)` | Writes `len` bytes from `buf` into `PART_UPDATE` at offset `address` from the start of the update partition. |
+
+### NSC usage example
+
+```c
+#include <wolfboot/wolfboot.h>
+
+/* Non-secure application running in TrustZone NS world */
+void ns_apply_update(const uint8_t *new_image, uint32_t image_len)
+{
+    uint32_t offset = 0;
+    uint32_t chunk  = 512; /* write in 512-byte chunks */
+
+    /* Erase the update partition first */
+    wolfBoot_nsc_erase_update(0, image_len);
+
+    /* Write the new image sector by sector */
+    while (offset < image_len) {
+        uint32_t len = (image_len - offset < chunk) ? (image_len - offset) : chunk;
+        wolfBoot_nsc_write_update(offset, new_image + offset, len);
+        offset += len;
+    }
+
+    /* Arm the update and reboot */
+    wolfBoot_nsc_update_trigger();
+    system_reset();
+}
+
+/* After reboot: confirm from NS world */
+void ns_confirm_boot(void)
+{
+    uint8_t st = 0;
+    wolfBoot_nsc_get_partition_state(PART_BOOT, &st);
+
+    if (st == IMG_STATE_TESTING) {
+        wolfBoot_nsc_success();
+    }
+}
+```

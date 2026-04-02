@@ -1,0 +1,461 @@
+---
+title: "NXP Targets"
+description: "wolfBoot support for NXP microcontrollers and processors including i.MX-RT, Kinetis, LPC, LS1028A, MCX families, S32K1xx, and QorIQ PowerPC processors."
+---
+
+wolfBoot supports a wide range of NXP devices from Cortex-M7 microcontrollers to 64-bit Cortex-A and PowerPC server processors. Most targets use the NXP MCUXpresso SDK for peripheral drivers.
+
+<Tabs>
+  <Tab title="i.MX-RT">
+
+## NXP i.MX-RT
+
+The i.MX-RT10xx family features a Cortex-M7 with DCP coprocessor for SHA-256 acceleration.
+
+**Supported devices:**
+
+| Device | Example config |
+|--------|----------------|
+| RT1040 | `config/examples/imx-rt1040.config` |
+| RT1050 | `config/examples/imx-rt1050.config` |
+| RT1060 / RT1061 / RT1062 | `config/examples/imx-rt1060.config` |
+| RT1064 | `config/examples/imx-rt1064.config` |
+| RT1060 (HAB) | `config/examples/imx-rt1060_hab.config` |
+
+### MCUXpresso SDK setup
+
+Obtain the SDK from the [MCUXpresso SDK Builder](https://mcuxpresso.nxp.com/en/welcome) and set the path in your `.config`:
+
+```makefile
+MCUXPRESSO?=/path/to/sdk
+MCUXPRESSO_CPU?=MIMXRT1062DVL6B
+MCUXPRESSO_DRIVERS?=$(MCUXPRESSO)/devices/MIMXRT1062
+MCUXPRESSO_CMSIS?=$(MCUXPRESSO)/CMSIS
+```
+
+For the mcuxsdk-manifests layout, add `MCUXSDK=1`.
+
+### Build
+
+```bash
+cp config/examples/imx-rt1060.config .config
+make
+```
+
+### Key options
+
+| Option | Description |
+|--------|-------------|
+| `PKA=1` | Enable DCP hardware acceleration for SHA-256 |
+| `TARGET_IMX_HAB=1` | Build without FCB/IVT for NXP Secure Provisioning Tool (HAB) |
+| `NXP_CUSTOM_DCD=1` | Load custom DCD from external `.dcd_data` section |
+| `CONFIG_IMX_FCB_LUT_SINGLE_READ_DATA` | Use single-read LUT if flash QE bit is factory-disabled |
+
+### Flash
+
+Firmware can be copied to the virtual USB drive, or programmed via JLink:
+
+```bash
+# HyperFlash (default on RT1050 EVKB)
+JLinkExe -if swd -speed 5000 -Device "MIMXRT1062XXX6B"
+
+# QSPI
+JLinkExe -if swd -speed 5000 -Device "MIMXRT1062XXX6B?BankAddr=0x60000000&Loader=QSPI"
+```
+
+At the JLink prompt:
+
+```
+loadbin factory.bin 0x60000000
+```
+
+### Debug
+
+```bash
+JLinkGDBServer -Device MIMXRT1062xxx6B -speed 5000 -if swd -port 3333
+
+arm-none-eabi-gdb
+add-symbol-file test-app/image.elf 0x60010100
+mon reset init
+b main
+c
+```
+
+  </Tab>
+  <Tab title="Kinetis">
+
+## NXP Kinetis
+
+Supports Kinetis K64F and K82F devices with optional LTC hardware crypto acceleration.
+
+**Example config:** `config/examples/kinetis-k82f.config`
+
+### Example partition layout (K82F)
+
+```
+WOLFBOOT_PARTITION_SIZE?=0x7A000
+WOLFBOOT_SECTOR_SIZE?=0x1000
+WOLFBOOT_PARTITION_BOOT_ADDRESS?=0xA000
+WOLFBOOT_PARTITION_UPDATE_ADDRESS?=0x84000
+WOLFBOOT_PARTITION_SWAP_ADDRESS?=0xff000
+```
+
+### Build
+
+```bash
+cp config/examples/kinetis-k82f.config .config
+make
+```
+
+Set `PKA=` (LTC) for hardware acceleration. Configure `MCUXPRESSO`, `MCUXPRESSO_CPU`, `MCUXPRESSO_DRIVERS`, and `MCUXPRESSO_CMSIS` for the MCUXpresso SDK path.
+
+  </Tab>
+  <Tab title="LPC54xxx / LPC55S69">
+
+## NXP LPC54xxx
+
+Tested with LPC54606J512BD208. Requires the NXP MCUXpresso SDK.
+
+**Example config:** `config/examples/lpc54606j512.config`
+
+### Build
+
+```bash
+make TARGET=lpc SIGN=ECC256 \
+    MCUXPRESSO=/path/to/LPC54606J512/SDK \
+    MCUXPRESSO_CPU=LPC54606J512BD208 \
+    MCUXPRESSO_DRIVERS=$(MCUXPRESSO)/devices/LPC54606 \
+    MCUXPRESSO_CMSIS=$(MCUXPRESSO)/CMSIS
+```
+
+### Flash (JLink)
+
+```
+JLinkExe -device LPC606J512 -if SWD -speed 4000
+erase
+loadbin factory.bin 0
+r
+h
+```
+
+---
+
+## NXP LPC55S69
+
+Dual-core Cortex-M33. Tested on LPCXpresso55S69 (LPC55S69-EVK) with the on-board LINK2 in CMSIS-DAP mode.
+
+**Example configs:**
+- `config/examples/lpc55s69.config` — no TrustZone
+- `config/examples/lpc55s69-tz.config` — TrustZone enabled
+
+### SDK setup
+
+```bash
+cd ../NXP
+python -m venv west-venv && source west-venv/bin/activate
+pip install west
+west init -m https://github.com/nxp-mcuxpresso/mcuxsdk-manifests.git mcuxpresso-sdk
+cd mcuxpresso-sdk
+west update_board --set board lpcxpresso55s69
+```
+
+### Build and flash
+
+```bash
+cp config/examples/lpc55s69.config .config
+make
+
+# Erase and program via LinkServer
+LinkServer flash LPC55S69 erase
+LinkServer flash LPC55S69 load factory.bin:0
+```
+
+### Firmware update
+
+```bash
+# Sign version 2
+./tools/keytools/sign --ecc384 --sha384 test-app/image.bin wolfboot_signing_private_key.der 2
+
+# Flash to update partition
+LinkServer flash LPC55S69 load test-app/image_v2_signed.bin:0x15000
+```
+
+Press RESET to apply the update. The LED changes from blue (v1) to green (v2).
+
+  </Tab>
+  <Tab title="MCX family">
+
+## NXP MCXA153
+
+Cortex-M33 at 96 MHz. Tested on FRDM-MCXA153.
+
+**Example config:** `config/examples/mcxa.config`
+
+### Build and flash
+
+```bash
+cp config/examples/mcxa.config .config
+make
+
+JLinkExe -if swd -Device MCXA153
+loadbin factory.bin 0
+```
+
+---
+
+## NXP MCXW716
+
+Cortex-M33 at 96 MHz. Tested on FRDM-MCXW716.
+
+**Example configs:**
+- `config/examples/mcxw.config`
+- `config/examples/mcxw-tz.config` — TrustZone enabled
+
+### Build and flash
+
+```bash
+cp config/examples/mcxw.config .config
+make
+
+JLinkExe -if swd -Device MCXW716
+loadbin factory.bin 0
+```
+
+---
+
+## NXP MCXN947
+
+Dual-core Cortex-M33. Tested on FRDM-MCXN947.
+
+**Example configs:**
+- `config/examples/mcxn.config` — both cores secure
+- `config/examples/mcxn-tz.config` — wolfBoot secure, app non-secure
+- `config/examples/mcxn-wolfcrypt-tz.config` — TrustZone + wolfPKCS11 NSC API
+
+### Build and flash
+
+```bash
+cp config/examples/mcxn.config .config
+make
+
+JLinkExe -if swd -Device MCXN947_M33_0
+loadbin factory.bin 0
+```
+
+### Firmware update
+
+```bash
+./tools/keytools/sign --ecc256 test-app/image.bin wolfboot_signing_private_key.der 2
+
+echo -n "pBOOT" > trigger_magic.bin
+./tools/bin-assemble/bin-assemble update.bin \
+    0x0    test-app/image_v2_signed.bin \
+    0xAFFB trigger_magic.bin
+
+# Flash to update partition (check WOLFBOOT_PARTITION_UPDATE_ADDRESS in .config)
+JLinkExe -if swd -Device MCXN947_M33_0
+loadbin update.bin 0x15000
+```
+
+  </Tab>
+  <Tab title="S32K1xx">
+
+## NXP S32K1xx
+
+Automotive-grade Cortex-M4F. Supports S32K142, S32K144, S32K146, S32K148.
+
+**Example configs:**
+
+| Variant | Flash | SRAM | Config |
+|---------|-------|------|--------|
+| S32K142 | 256 KB | 32 KB | `config/examples/nxp-s32k142.config` |
+| S32K144 | 512 KB | 64 KB | `config/examples/nxp-s32k144.config` |
+| S32K146 | 1 MB | 128 KB | `config/examples/nxp-s32k146.config` |
+| S32K148 | 2 MB | 256 KB | `config/examples/nxp-s32k148.config` |
+
+### Default memory layout (S32K142, 256 KB)
+
+| Region | Address range | Size |
+|--------|--------------|------|
+| Bootloader | `0x00000000` – `0x0000BFFF` | 48 KB |
+| Boot partition | `0x0000C000` – `0x00024FFF` | 100 KB |
+| Update partition | `0x00025000` – `0x0003DFFF` | 100 KB |
+| Swap sector | `0x0003E000` – `0x0003E7FF` | 2 KB |
+
+### Build
+
+```bash
+cp config/examples/nxp-s32k142.config .config
+make
+```
+
+### Key build options
+
+| Option | Description |
+|--------|-------------|
+| `NVM_FLASH_WRITEONCE` | **Required.** Flash write-once per erase cycle |
+| `RAM_CODE` | **Required.** Run flash erase/write from RAM |
+| `WOLFBOOT_RESTORE_CLOCK` | Restore SIRC (8 MHz) before booting app |
+| `WATCHDOG=1` | Enable watchdog during wolfBoot operation |
+| `DEBUG_UART=1` | Enable LPUART1 output (PTC7=TX, PTC6=RX, 115200 baud) |
+
+### Flash (PEMicro)
+
+```bash
+pegdbserver_console -device=NXP_S32K1xx_S32K142F256M15 \
+    -startserver -interface=OPENSDA -port=USB1 -serverport=7224 -speed=5000
+
+arm-none-eabi-gdb --nx wolfboot.elf
+target remote :7224
+monitor reset halt
+load
+monitor reset run
+```
+
+### Flash (USB mass storage / OpenSDA)
+
+```bash
+make factory.srec
+cp factory.srec /media/<user>/S32K142EVB/
+```
+
+  </Tab>
+  <Tab title="LS1028A">
+
+## NXP LS1028A
+
+AArch64 (Cortex-A72) processor. Tested with the NXP LS1028ARDB.
+
+**Example configs:**
+- `config/examples/nxp-ls1028a.config`
+- `config/examples/nxp-ls1028a-tpm.config` — with TPM
+
+### Build
+
+```bash
+cp ./config/examples/nxp-ls1028a.config .config
+make distclean
+make keytools
+make
+```
+
+This produces `wolfboot.bin`, `image_v1_signed.bin`, and `factory.bin`.
+
+### DIP switch configuration (XSPI NOR boot)
+
+```
+SW2: 0xF8 = 11111000
+SW3: 0x70 = 01110000
+SW5: 0x20 = 00100000
+```
+
+### Flash layout (default)
+
+| Component | NOR flash offset | Memory-mapped address |
+|-----------|-----------------|----------------------|
+| RCW | `0x0` | `0x20000000` |
+| wolfBoot | `0x1000` | `0x20001000` |
+| Application | `0x20000` | `0x20020000` |
+| Update | `0x40000` | `0x20040000` |
+
+Program using Lauterbach, CodeWarrior, or a custom flash tool. The `factory.bin` contains wolfBoot and the signed application merged at the correct offsets.
+
+  </Tab>
+  <Tab title="QorIQ PPC">
+
+## NXP QorIQ P1021 (PPC e500v2)
+
+Two-core PPC e500v2 processor. Boots from NAND flash via eLBC FCM.
+
+**Example config:** `config/examples/nxp-p1021.config`
+
+### Boot design
+
+1. First 4 KB stage-1 loader resides at offset `0x00000000` in NAND.
+2. Boot ROM loads it to `0xFFFF0000` and jumps to `0xFFFFFFFC`.
+3. Stage-1 initialises TLB, DDR, UART, copies wolfBoot to DDR, then jumps.
+4. wolfBoot verifies and boots the application from DDR.
+
+### NAND flash layout (default)
+
+| File | NAND offset |
+|------|-------------|
+| `stage1/loader_stage1.bin` | `0x00000000` |
+| `wolfboot.bin` | `0x00008000` |
+| `test-app/image_v1_signed.bin` | `0x00200000` |
+| Update partition | `0x01200000` |
+| `fsl_qe_ucode_1021_10_A.bin` | `0x01F00000` |
+| Swap block | `0x02200000` |
+
+### Build
+
+```bash
+cp config/examples/nxp-p1021.config .config
+make keytools
+make stage1
+make wolfboot.bin
+make test-app/image.bin
+IMAGE_HEADER_SIZE=512 ./tools/keytools/sign --ecc384 --sha384 \
+    test-app/image.elf wolfboot_signing_private_key.der 1
+
+./tools/bin-assemble/bin-assemble factory.bin \
+    0x0        hal/nxp_p1021_stage1.bin \
+    0x8000     wolfboot.bin \
+    0x200000   test-app/image_v1_signed.bin \
+    0x01F00000 fsl_qe_ucode_1021_10_A.bin
+```
+
+---
+
+## NXP QorIQ T1024 / T1040 (PPC e5500)
+
+64-bit PPC e5500 at 1400 MHz. Both share HAL code (`hal/nxp_t10xx.c`) with `#ifdef` guards.
+
+| Feature | T1024 | T1040 |
+|---------|-------|-------|
+| Cores | 2 | 4 |
+| DDR4 | 2 GB | 8 GB |
+| NOR Flash | 64 MB at `0xEC000000` | 128 MB at `0xE8000000` |
+| Config | `nxp-t1024.config` | `nxp-t1040.config` |
+
+Two-stage boot: stage-1 runs XIP from NOR, initialises DDR, copies wolfBoot to `0x7FF00000`, then jumps.
+
+### Build
+
+```bash
+cp ./config/examples/nxp-t1024.config .config   # or nxp-t1040.config
+make clean && make keytools && make
+```
+
+Produces `factory_wstage1.bin` programmed at `0xEC000000` (T1024) or `0xE8000000` (T1040).
+
+---
+
+## NXP QorIQ T2080 (PPC e6500)
+
+Four-core PPC e6500. Tested with the NAII 68PPC2 board.
+
+**Example config:** `config/examples/nxp-t2080.config`
+
+Boot entry point is `0xEFFFFFFC`. Stage-1 assembly configures TLB/LAW, uses L1 locked D-cache as stack before DDR init, then relocates wolfBoot to DDR.
+
+### Build
+
+```bash
+cp ./config/examples/nxp-t2080.config .config
+make clean && make keytools && make
+```
+
+Produces `factory.bin` programmed at `0xE8080000`.
+
+### Flash layout
+
+| Description | Address |
+|-------------|---------|
+| Reset Configuration Word (RCW) | `0xE8000000` |
+| Frame Manager Microcode | `0xE8020000` |
+| Signed application | `0xE8080000` |
+| wolfBoot | `0xEFF40000` |
+
+  </Tab>
+</Tabs>

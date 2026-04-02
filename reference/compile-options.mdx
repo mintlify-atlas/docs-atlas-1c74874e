@@ -1,0 +1,442 @@
+---
+title: "Compile options reference"
+description: "Complete reference for all build-time configuration options available when compiling wolfBoot."
+---
+
+wolfBoot is configured at compile time through make variables. You can pass options directly on the command line or define them in a `.config` file in the wolfBoot root directory.
+
+```bash
+# Command line
+make SIGN=ECC256 HASH=SHA256 TARGET=stm32h7
+
+# Or use a .config file (use ?= so command-line overrides work)
+SIGN?=ECC256
+HASH?=SHA256
+TARGET?=stm32h7
+```
+
+Generate an interactive `.config` file with defaults filled in by running:
+
+```bash
+make config
+```
+
+<Note>
+Command-line options take priority over `.config` options as long as `.config` values use the `?=` operator.
+</Note>
+
+---
+
+## Platform selection
+
+<ParamField path="TARGET" type="string" default="stm32f4">
+  Target platform. Selects the HAL driver and linker script from the `hal/` directory. See the [Supported Targets](/reference/targets/overview) page for the full list of platforms.
+
+  Common values: `stm32f4`, `stm32h7`, `stm32l5`, `nrf52`, `rpi3`, `sim`
+</ParamField>
+
+<ParamField path="ARCH" type="string">
+  Architecture override. Usually inferred from `TARGET`. Set explicitly when adding a new platform or cross-compiling for an architecture without a native HAL entry.
+
+  Examples: `ARM`, `AARCH64`, `RISCV`, `x86_64`, `RENESAS_RX`, `AURIX_TC3`
+</ParamField>
+
+<ParamField path="CORTEX_M0" type="boolean" default="0">
+  Compile for ARM Cortex-M0/M0+. By default wolfBoot targets Cortex-M3/4/7. Set to `1` when the target is a lower-end M0 core.
+
+  ```bash
+  make CORTEX_M0=1
+  ```
+</ParamField>
+
+---
+
+## Signature algorithm
+
+<ParamField path="SIGN" type="string" default="ED25519">
+  Digital signature algorithm used to authenticate firmware images. This setting affects the bootloader size, boot time, key generation, and the signing tool invocation.
+
+  | Value | Algorithm | Min header size | Notes |
+  |-------|-----------|----------------|-------|
+  | `ED25519` | Ed25519 | 256 B | Default. Smallest code size, good boot time. |
+  | `ED448` | Ed448 | 512 B | Requires SHA-3 for hash. |
+  | `ECC256` | ECDSA P-256 | 256 B | Fast verification with assembly optimizations. |
+  | `ECC384` | ECDSA P-384 | 512 B | Higher security margin than P-256. |
+  | `ECC521` | ECDSA P-521 | 512 B | Largest ECC curve supported. |
+  | `RSA2048` | RSA-2048 | 512 B | Wide compatibility. Large stack usage without SP math. |
+  | `RSA3072` | RSA-3072 | 512 B | NIST recommended minimum for RSA. |
+  | `RSA4096` | RSA-4096 | 1024 B | Highest RSA security level. |
+  | `LMS` | LMS/HSS | Configurable | Post-quantum. Requires `LMS_LEVELS`, `LMS_HEIGHT`, `LMS_WINTERNITZ`, `IMAGE_SIGNATURE_SIZE`, `IMAGE_HEADER_SIZE`. |
+  | `XMSS` | XMSS/XMSS^MT | Configurable | Post-quantum. Requires `XMSS_PARAMS`, `IMAGE_SIGNATURE_SIZE`, `IMAGE_HEADER_SIZE`. |
+  | `ML_DSA` | ML-DSA (Dilithium) | Configurable | Post-quantum. Requires `ML_DSA_LEVEL`. |
+  | `NONE` | None | 256 B | Disables authentication entirely. Not recommended for production. |
+
+  ```bash
+  make SIGN=ECC256
+  make SIGN=RSA3072
+  make SIGN=ML_DSA ML_DSA_LEVEL=2
+  ```
+</ParamField>
+
+<ParamField path="SIGN_SECONDARY" type="string">
+  Optional secondary signature algorithm for hybrid signing. Enables dual-signature verification where both the primary and secondary algorithms must pass. Accepts the same values as `SIGN`.
+
+  ```bash
+  make SIGN=ECC256 SIGN_SECONDARY=ML_DSA ML_DSA_LEVEL=2
+  ```
+</ParamField>
+
+<AccordionGroup>
+  <Accordion title="LMS-specific parameters">
+    When `SIGN=LMS`, the following are all required:
+
+    | Option | Description |
+    |--------|-------------|
+    | `LMS_LEVELS` | Number of HSS tree levels (e.g. `2`) |
+    | `LMS_HEIGHT` | Height of each LMS tree (e.g. `5`) |
+    | `LMS_WINTERNITZ` | Winternitz parameter (e.g. `8`) |
+    | `IMAGE_SIGNATURE_SIZE` | Signature size in bytes (algorithm-dependent) |
+    | `IMAGE_HEADER_SIZE` | Manifest header size in bytes |
+
+    `WOLFBOOT_SMALL_STACK=1` is incompatible with LMS.
+  </Accordion>
+
+  <Accordion title="XMSS-specific parameters">
+    When `SIGN=XMSS`, the following are all required:
+
+    | Option | Description |
+    |--------|-------------|
+    | `XMSS_PARAMS` | XMSS parameter set string (e.g. `"XMSS-SHA2_10_256"`) |
+    | `IMAGE_SIGNATURE_SIZE` | Signature size in bytes |
+    | `IMAGE_HEADER_SIZE` | Manifest header size in bytes |
+
+    `WOLFBOOT_SMALL_STACK=1` is incompatible with XMSS.
+  </Accordion>
+
+  <Accordion title="ML-DSA-specific parameters">
+    When `SIGN=ML_DSA`:
+
+    | Option | Description |
+    |--------|-------------|
+    | `ML_DSA_LEVEL` | Security level: `2`, `3`, or `5` |
+
+    ML-DSA requires SHA-3. If `HASH` is not set to `SHA3`, the SHA-3 source is linked in automatically.
+    `WOLFBOOT_SMALL_STACK=1` is not yet supported with ML-DSA.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Hash algorithm
+
+<ParamField path="HASH" type="string" default="SHA256">
+  Hash algorithm for digest calculation over firmware images and public keys. Must match the algorithm used in the signing tool.
+
+  | Value | Algorithm | Notes |
+  |-------|-----------|-------|
+  | `SHA256` | SHA-256 | Default. Supported by all signature algorithms. |
+  | `SHA384` | SHA-384 | Requires additional SHA-512 source objects. |
+  | `SHA3` | SHA3-384 | Required for ED448. Also used with ML-DSA. |
+
+  ```bash
+  make HASH=SHA384
+  ```
+</ParamField>
+
+---
+
+## Partition layout
+
+These values define the physical flash map. They are used to generate `include/target.h` at build time.
+
+<Warning>
+All partition address and size values must be aligned to `WOLFBOOT_SECTOR_SIZE`. Misaligned partitions will cause undefined behavior during firmware swaps.
+</Warning>
+
+<ParamField path="WOLFBOOT_SECTOR_SIZE" type="number" required>
+  Size of the smallest erasable flash sector in bytes. wolfBoot uses this as the unit for firmware swap operations. If the boot and update partitions span areas with different sector sizes, use the larger of the two values.
+
+  The SWAP partition is exactly one sector in size.
+
+  ```make
+  WOLFBOOT_SECTOR_SIZE?=0x20000
+  ```
+</ParamField>
+
+<ParamField path="WOLFBOOT_PARTITION_BOOT_ADDRESS" type="number" required>
+  Start address of the BOOT partition in flash. Must be aligned to a sector boundary. The first 256 bytes (or more, depending on the signature algorithm) are reserved for the manifest header; application code begins after that offset.
+
+  ```make
+  WOLFBOOT_PARTITION_BOOT_ADDRESS?=0x20000
+  ```
+</ParamField>
+
+<ParamField path="WOLFBOOT_PARTITION_UPDATE_ADDRESS" type="number" required>
+  Start address of the UPDATE partition. When `EXT_FLASH=1` is set, this value is an offset from the beginning of the external memory's addressable space rather than an absolute flash address.
+
+  ```make
+  WOLFBOOT_PARTITION_UPDATE_ADDRESS?=0xA0000
+  ```
+</ParamField>
+
+<ParamField path="WOLFBOOT_PARTITION_SWAP_ADDRESS" type="number" required>
+  Start address of the SWAP partition. The SWAP area is exactly `WOLFBOOT_SECTOR_SIZE` bytes. When `EXT_FLASH=1` is used, this is an offset into the external memory space.
+
+  ```make
+  WOLFBOOT_PARTITION_SWAP_ADDRESS?=0x120000
+  ```
+</ParamField>
+
+<ParamField path="WOLFBOOT_PARTITION_SIZE" type="number" required>
+  Size of both the BOOT and UPDATE partitions in bytes. Both partitions share the same size.
+
+  ```make
+  WOLFBOOT_PARTITION_SIZE?=0x80000
+  ```
+</ParamField>
+
+---
+
+## Security options
+
+<ParamField path="TZEN" type="boolean" default="0">
+  Enable ARM TrustZone-M support. Sets the `TZEN` compiler definition and enables secure/non-secure world partitioning. Typically used with STM32L5, STM32H5, and similar TrustZone-capable MCUs.
+
+  ```bash
+  make TZEN=1
+  ```
+</ParamField>
+
+<ParamField path="WOLFBOOT_TPM_VERIFY" type="boolean" default="0">
+  Offload signature verification to a TPM 2.0 device via wolfTPM. When set, wolfBoot uses the TPM for cryptographic operations rather than wolfCrypt. Automatically enables `WOLFTPM=1`.
+
+  ```bash
+  make WOLFBOOT_TPM_VERIFY=1
+  ```
+</ParamField>
+
+<ParamField path="MEASURED_BOOT" type="boolean" default="0">
+  Enable measured boot. wolfBoot extends a TPM PCR register with measurements of the firmware image before booting it. Requires a TPM 2.0 device. Automatically enables `WOLFTPM=1`.
+
+  Set `MEASURED_PCR_A` to the PCR index to extend (e.g., `MEASURED_PCR_A=0`).
+
+  ```bash
+  make MEASURED_BOOT=1 MEASURED_PCR_A=16
+  ```
+</ParamField>
+
+<ParamField path="ENCRYPT" type="boolean" default="0">
+  Enable encryption for external partitions. Update images must be pre-encrypted with the sign tool before deployment. wolfBoot decrypts them on-the-fly using a pre-shared symmetric key.
+
+  Select the encryption algorithm with one of the following. ChaCha20 is the default if none is specified:
+
+  | Option | Algorithm | Key file size |
+  |--------|-----------|---------------|
+  | (default) | ChaCha20 | 44 bytes (32 key + 12 IV) |
+  | `ENCRYPT_WITH_AES128=1` | AES-128-CTR | 32 bytes (16 key + 16 IV) |
+  | `ENCRYPT_WITH_AES256=1` | AES-256-CTR | 48 bytes (32 key + 16 IV) |
+
+  Requires `EXT_FLASH=1`.
+
+  ```bash
+  make ENCRYPT=1 EXT_FLASH=1
+  make ENCRYPT=1 ENCRYPT_WITH_AES256=1 EXT_FLASH=1
+  ```
+</ParamField>
+
+<ParamField path="DISABLE_BACKUP" type="boolean" default="0">
+  Disable the backup copy of the running firmware during an update. When set, wolfBoot does not copy the current BOOT image to the UPDATE partition before installing the new firmware. This removes the fallback mechanism but may be necessary when the bootloader cannot write to the UPDATE partition.
+
+  ```bash
+  make DISABLE_BACKUP=1
+  ```
+</ParamField>
+
+<ParamField path="ALLOW_DOWNGRADE" type="boolean" default="0">
+  Allow firmware version roll-backs. By default wolfBoot rejects updates to a lower version number. Setting this to `1` disables version checking.
+
+  <Warning>
+  Enabling this option removes protection against forced downgrade attacks.
+  </Warning>
+</ParamField>
+
+<ParamField path="FLASH_OTP_KEYSTORE" type="boolean" default="0">
+  Store public keys in a one-time programmable (OTP) flash region instead of linking them into the bootloader image. See the [OTP keystore documentation](/security/keystore) for provisioning details.
+</ParamField>
+
+---
+
+## Performance options
+
+<ParamField path="NO_ASM" type="boolean" default="0">
+  Disable all assembly optimizations. Produces a smaller bootloader binary at the cost of longer boot times. Useful when code size is the primary constraint.
+
+  | Configuration | wolfBoot size | Boot time (100 KB image) |
+  |--------------|---------------|--------------------------|
+  | `SIGN=ECC256` (full ASM) | 21,836 B | 0.583 s |
+  | `SIGN=ECC256 NO_ARM_ASM=1` | 18,624 B | 0.760 s |
+  | `SIGN=ECC256 NO_ASM=1` | 14,416 B | 3.356 s |
+
+  ```bash
+  make NO_ASM=1
+  ```
+</ParamField>
+
+<ParamField path="NO_ARM_ASM" type="boolean" default="0">
+  Disable ARM-specific assembly optimizations for hash and symmetric cipher operations (SHA-2, AES), while retaining SP math assembly for ECC/RSA key verification. A useful middle ground between maximum speed and minimum size.
+
+  ```bash
+  make SIGN=ECC256 NO_ARM_ASM=1
+  ```
+</ParamField>
+
+<ParamField path="WOLFBOOT_SMALL_STACK" type="boolean" default="0">
+  Reduce stack usage by allocating cryptographic objects from a statically sized pool at compile time instead of the stack. Useful for targets with limited RAM.
+
+  Incompatible with `SIGN=LMS`, `SIGN=XMSS`, and `SIGN=ML_DSA`.
+
+  ```bash
+  make WOLFBOOT_SMALL_STACK=1
+  ```
+</ParamField>
+
+<ParamField path="WOLFBOOT_HUGE_STACK" type="boolean" default="0">
+  Bypass compile-time stack size checks. Use this only when you have verified that sufficient RAM is available and the default limits are too conservative for your algorithm/key-size combination.
+</ParamField>
+
+---
+
+## Update options
+
+<ParamField path="DELTA_UPDATES" type="boolean" default="0">
+  Enable incremental (delta) firmware updates. Only the binary diff between the current and new firmware is transferred and applied. Uses the Bentley-McIlroy compression scheme.
+
+  Requires signing with the `--delta` flag in the sign tool. Optionally set `DELTA_BLOCK_SIZE` to override the default diff block size.
+
+  ```bash
+  make DELTA_UPDATES=1
+  ```
+</ParamField>
+
+<ParamField path="FLAGS_HOME" type="boolean" default="0">
+  Store UPDATE partition status flags in the BOOT partition instead of at the end of the UPDATE partition. Useful when the UPDATE partition is on external flash and keeping all flags in internal flash is preferred.
+
+  ```bash
+  make FLAGS_HOME=1
+  ```
+</ParamField>
+
+<ParamField path="NVM_FLASH_WRITEONCE" type="boolean" default="0">
+  Enable a workaround for flash memories that do not support partial writes after erase (write-once flash). wolfBoot normally uses bit-clearing writes to update partition flags without erasing; this option disables that mechanism.
+
+  <Warning>
+  When `NVM_FLASH_WRITEONCE=1` is set, the fail-safe swap guarantee is removed. The device must not be powered off or reset during a swap operation. Incompatible with `EXT_FLASH=1`.
+  </Warning>
+</ParamField>
+
+<ParamField path="EXT_FLASH" type="boolean" default="0">
+  Enable external flash memory support. When set, the UPDATE and SWAP partitions use alternative HAL functions (`ext_flash_*`) for read/write/erase. Set `PART_UPDATE_EXT=1` and/or `PART_SWAP_EXT=1` to assign individual partitions to external memory.
+
+  Can be combined with `SPI_FLASH=1` (SPI flash driver) or `UART_FLASH=1` (UART bridge) to avoid implementing custom `ext_flash_*` functions.
+</ParamField>
+
+<ParamField path="FLAGS_INVERT" type="boolean" default="0">
+  Invert the logic for erased flash pages. Set this when the target flash initializes erased pages to `0x00` instead of the standard `0xFF`. Also sets `FILL_BYTE=0x00` automatically.
+
+  Use `FLAGS_HOME=1` alongside this option when combining internal and SPI external flash.
+</ParamField>
+
+<ParamField path="DUALBANK_SWAP" type="boolean" default="0">
+  Enable hardware-assisted dual-bank flash swapping. Currently supported on STM32F76x and F77x devices only.
+</ParamField>
+
+---
+
+## Debug options
+
+<ParamField path="DEBUG" type="boolean" default="0">
+  Enable debug build. Compiles with `-O0` and the `DEBUG` preprocessor symbol defined. Significantly increases binary size — ensure sufficient flash space before `WOLFBOOT_PARTITION_BOOT_ADDRESS`.
+
+  ```bash
+  make DEBUG=1
+  ```
+</ParamField>
+
+<ParamField path="DEBUG_UART" type="boolean" default="0">
+  Enable UART-based debug output from the bootloader. Requires `UART_TARGET` to be set to match a driver in `hal/uart/`. Has no effect if no matching driver file is found.
+
+  ```bash
+  make DEBUG_UART=1 UART_TARGET=stm32
+  ```
+</ParamField>
+
+<ParamField path="UART_PORT" type="number">
+  UART peripheral index to use for debug output when `DEBUG_UART=1` is set. The meaning of this value is platform-specific.
+</ParamField>
+
+<ParamField path="V" type="boolean" default="0">
+  Verbose build output. Set to `1` to echo every compiler and linker command.
+
+  ```bash
+  make V=1
+  ```
+</ParamField>
+
+---
+
+## Library path overrides
+
+wolfBoot includes all library dependencies as git submodules under `lib/`. Override these to use a local copy of a library:
+
+| Variable | Library |
+|----------|---------|
+| `WOLFBOOT_LIB_WOLFSSL` | wolfSSL (absolute path) |
+| `WOLFBOOT_LIB_WOLFTPM` | wolfTPM (absolute path) |
+| `WOLFBOOT_LIB_WOLFPKCS11` | wolfPKCS11 (absolute path) |
+| `WOLFBOOT_LIB_WOLFPSA` | wolfPSA (absolute path) |
+| `WOLFBOOT_LIB_WOLFHSM` | wolfHSM (absolute path) |
+
+<Note>
+All paths must be absolute. Relative paths are not supported by the Makefiles.
+</Note>
+
+---
+
+## Example .config file
+
+A realistic configuration for an STM32H7 target using ECC-256 signatures, SHA-256 hashing, and an external SPI flash for updates:
+
+```make
+TARGET?=stm32h7
+SIGN?=ECC256
+HASH?=SHA256
+
+WOLFBOOT_SECTOR_SIZE?=0x20000
+WOLFBOOT_PARTITION_SIZE?=0x80000
+WOLFBOOT_PARTITION_BOOT_ADDRESS?=0x08020000
+WOLFBOOT_PARTITION_UPDATE_ADDRESS?=0x080A0000
+WOLFBOOT_PARTITION_SWAP_ADDRESS?=0x08120000
+
+EXT_FLASH?=1
+SPI_FLASH?=1
+ENCRYPT?=1
+ENCRYPT_WITH_AES256?=1
+
+DELTA_UPDATES?=1
+FLAGS_HOME?=1
+
+DEBUG_UART?=1
+UART_TARGET?=stm32
+```
+
+Build with:
+
+```bash
+make
+```
+
+Or override any value at the command line:
+
+```bash
+make DEBUG=1
+```

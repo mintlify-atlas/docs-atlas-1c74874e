@@ -1,0 +1,192 @@
+---
+title: "Firmware Update"
+description: "The complete secure update flow: storing an image, triggering a swap, confirming success, automatic rollback on failure, power-fail safety, anti-rollback versioning, and delta updates."
+---
+
+wolfBoot updates firmware by **swapping** the contents of the BOOT and UPDATE partitions one sector at a time. Every step is authenticated, every state transition is recorded in flash, and the process can be safely interrupted and resumed at any point.
+
+## Full update flow
+
+<Steps>
+  <Step title="Store the new image in the UPDATE partition">
+    The running application receives the new signed firmware image over whatever
+    transport is appropriate (UART, CAN, Ethernet, etc.) and writes it to
+    `WOLFBOOT_PARTITION_UPDATE_ADDRESS`. The image must include its wolfBoot
+    manifest header (produced by the `sign` tool).
+
+    ```c
+    /* Example: write received bytes to the UPDATE partition via HAL */
+    hal_flash_unlock();
+    hal_flash_erase(WOLFBOOT_PARTITION_UPDATE_ADDRESS,
+                    WOLFBOOT_PARTITION_SIZE);
+    hal_flash_write(WOLFBOOT_PARTITION_UPDATE_ADDRESS,
+                    new_image_buf, new_image_size);
+    hal_flash_lock();
+    ```
+  </Step>
+  <Step title="Trigger the update">
+    Call `wolfBoot_update_trigger()`. This sets the UPDATE partition state byte
+    to `IMG_STATE_UPDATING` (`0x70`), which tells wolfBoot on the next reboot
+    that a swap is pending.
+
+    ```c
+    #include "wolfboot/wolfboot.h"
+
+    wolfBoot_update_trigger();
+    ```
+  </Step>
+  <Step title="Reboot">
+    Reset the device. wolfBoot reads the UPDATE partition state, finds
+    `IMG_STATE_UPDATING`, and begins the validated swap.
+  </Step>
+  <Step title="Bootloader validates and swaps">
+    wolfBoot performs the following sequence before executing any firmware:
+
+    1. Recomputes the SHA-256 hash of the UPDATE image and compares it with the
+       `HDR_SHA256` TLV tag.
+    2. Verifies the digital signature in the `HDR_SIGNATURE` tag against the
+       built-in public key.
+    3. Swaps the BOOT and UPDATE partitions sector-by-sector, using the SWAP
+       partition as scratch space. Each sector's progress is recorded in the
+       sector flags so the operation can be resumed after a power failure.
+    4. Sets the BOOT partition state to `IMG_STATE_TESTING` (`0x10`).
+    5. Boots the new firmware.
+  </Step>
+  <Step title="Application confirms success">
+    After the application starts and verifies that the system is operating
+    correctly, it must call `wolfBoot_success()` to permanently confirm the
+    update.
+
+    ```c
+    #include "wolfboot/wolfboot.h"
+
+    /* Run your self-tests, check connectivity, etc. */
+    if (system_is_healthy()) {
+        wolfBoot_success();   /* sets BOOT state to IMG_STATE_SUCCESS */
+    }
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The application **must** call `wolfBoot_success()` before the next reboot.
+  If it does not, wolfBoot interprets the `IMG_STATE_TESTING` state as a boot
+  failure and initiates an automatic rollback.
+</Note>
+
+## Rollback
+
+If the application fails to call `wolfBoot_success()` — because it crashed, hung, or was deliberately not confirmed — the BOOT partition remains in `IMG_STATE_TESTING` when the device reboots. wolfBoot detects this condition and reverses the swap:
+
+```
+Normal update:
+  UPDATE (new image, UPDATING) → swap → BOOT (new image, TESTING)
+                                                    ↓ wolfBoot_success()
+                                         BOOT (new image, SUCCESS) ✓
+
+Rollback (no confirmation):
+  BOOT (new image, TESTING) → reboot → wolfBoot detects TESTING state
+  → swaps back: BOOT (old image, SUCCESS), UPDATE (new image, NEW)
+```
+
+The previous firmware is always preserved in the UPDATE partition after the initial swap, so a rollback is always available until the next update cycle.
+
+## Power-fail safety
+
+wolfBoot uses the sector flags stored at the end of the UPDATE partition (or BOOT partition with `FLAGS_HOME`) to track the state of every individual sector:
+
+| Flag | Meaning |
+|---|---|
+| `SECT_FLAG_NEW` | Sector not yet touched in this swap |
+| `SECT_FLAG_SWAPPING` | Copy from BOOT → SWAP in progress |
+| `SECT_FLAG_BACKUP` | Sector backed up; ready to write UPDATE → BOOT |
+| `SECT_FLAG_UPDATED` | Sector swap complete |
+
+On every reboot, wolfBoot scans these flags and resumes any incomplete swap from exactly where it was interrupted. No manual intervention is required.
+
+<Warning>
+  Power-fail safety applies only to **firmware** swaps. The **self-update**
+  (bootloader replacement) procedure writes the new bootloader in-place and is
+  not safe from interruption. A power failure during a self-update can leave
+  the device unbootable.
+</Warning>
+
+## Anti-rollback versioning
+
+wolfBoot can enforce a minimum version requirement so that a device cannot be downgraded to a known-vulnerable firmware version. The version number is stored in the `HDR_VERSION` TLV tag (a 32-bit unsigned integer) in the manifest header.
+
+When anti-rollback is enabled, wolfBoot will refuse to install any image whose version is lower than the version of the currently running firmware.
+
+```c
+/* Read the version of the image in each partition */
+uint32_t boot_ver   = wolfBoot_current_firmware_version();
+uint32_t update_ver = wolfBoot_update_firmware_version();
+```
+
+The version number is set at signing time:
+
+```bash
+# Sign image as version 3; wolfBoot will reject any future image with version < 3
+./tools/keytools/sign --ed25519 --sha256 \
+    test-app/image.bin \
+    wolfboot_signing_private_key.der \
+    3
+```
+
+<Tip>
+  Increment the version number on every release. Once a device confirms a
+  version-3 image with `wolfBoot_success()`, it will never accept a version-2
+  image again.
+</Tip>
+
+## Delta (incremental) updates
+
+Instead of transferring a complete firmware binary, wolfBoot supports **delta updates**: signed binary patches that encode only the difference between the currently running version and the new version. This can substantially reduce transfer size over constrained links.
+
+Delta updates use the Bentley/McIlroy algorithm and require `DELTA_UPDATES=1` at build time.
+
+### Creating a delta bundle
+
+```bash
+# Step 1: sign the base image (version 1) as a full image
+./tools/keytools/sign --ecc256 --sha256 \
+    test-app/image.bin \
+    wolfboot_signing_private_key.der 1
+
+# Step 2: sign version 2 as a delta relative to the signed v1 image
+./tools/keytools/sign --delta test-app/image_v1_signed.bin \
+    --ecc256 --sha256 \
+    test-app/image.bin \
+    wolfboot_signing_private_key.der 2
+```
+
+The second command produces two output files:
+
+- `image_v2_signed.bin` — full signed image (as usual)
+- `image_v2_signed_diff.bin` — the delta bundle (**transfer this one**)
+
+### How wolfBoot applies the patch
+
+1. wolfBoot receives `image_v2_signed_diff.bin` in the UPDATE partition.
+2. On the next reboot, it verifies the integrity and authenticity of the **delta bundle itself** (first verification pass).
+3. It applies the patch to the current BOOT image in-place, reconstructing version 2.
+4. It then re-verifies the **resulting image** for integrity and authenticity (second verification pass).
+5. If both passes succeed, the system boots into version 2 in `IMG_STATE_TESTING`.
+
+The delta bundle also contains a **reverse patch**. If the update is not confirmed with `wolfBoot_success()`, wolfBoot applies the reverse patch to restore version 1 during rollback.
+
+<Note>
+  From the application's point of view, a delta update is identical to a full
+  update. You still call `wolfBoot_update_trigger()` after writing the bundle
+  to the UPDATE partition, and `wolfBoot_success()` after the first successful
+  boot of the new version.
+</Note>
+
+<CardGroup cols={2}>
+  <Card title="Firmware image format" icon="file-code" href="/concepts/firmware-image">
+    The manifest header structure, TLV tags, and image states.
+  </Card>
+  <Card title="Flash partitions" icon="hard-drive" href="/concepts/flash-partitions">
+    BOOT, UPDATE, and SWAP partition layout and sector alignment rules.
+  </Card>
+</CardGroup>

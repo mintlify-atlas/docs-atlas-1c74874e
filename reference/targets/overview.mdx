@@ -1,0 +1,105 @@
+---
+title: "Supported Targets"
+description: "wolfBoot supports 50+ targets across multiple MCU and processor families including STM32, NXP, Renesas, x86, ARM Cortex-A, RISC-V, and more."
+---
+
+wolfBoot supports more than 50 hardware targets spanning Cortex-M, Cortex-A, RISC-V, PowerPC, and x86-64 architectures. Each target has a dedicated HAL driver in `hal/` and one or more example configuration files in `config/examples/`.
+
+## Target families
+
+<CardGroup cols={2}>
+  <Card title="STM32" icon="microchip" href="/reference/targets/stm32">
+    STM32F1, STM32F4, STM32F7, STM32G0, STM32H5, STM32H7, STM32L0, STM32L4, STM32L5, STM32U5, STM32WB55, STM32C0
+  </Card>
+  <Card title="NXP" icon="microchip" href="/reference/targets/nxp">
+    i.MX-RT (1040/1050/1060/1061/1064), Kinetis K64/K82, LPC54xxx, LPC55S69, LS1028A, MCXA153, MCXW716, MCXN947, S32K1xx, QorIQ P1021/T1024/T1040/T2080
+  </Card>
+  <Card title="Renesas" icon="microchip" href="/reference/targets/renesas">
+    RA6M4 (SCE hardware crypto), RX65N (TSIP), RX72N (TSIP), RZN2L (RSIP)
+  </Card>
+  <Card title="x86-64 / UEFI" icon="server" href="/reference/targets/x86">
+    Intel FSP (TigerLake, QEMU), Kontron VX3060-S2, QEMU UEFI (EFI application mode), AMD Versal, Xilinx Zynq UltraScale+
+  </Card>
+  <Card title="ARM Cortex-A" icon="cpu" href="/reference/targets/x86">
+    Raspberry Pi 3 (Cortex-A53, experimental), Xilinx Zynq UltraScale+ (ZCU102), AMD Versal Gen 1 VMK180
+  </Card>
+  <Card title="RISC-V" icon="cpu" href="/reference/targets/overview">
+    SiFive HiFive1 (FE310, 32-bit), Microchip PolarFire SoC MPFS250 (RV64, 5-core)
+  </Card>
+  <Card title="Nordic" icon="microchip" href="/reference/targets/overview">
+    nRF52840, nRF5340 (dual-core app + net), nRF54L15 (Cortex-M33 + RISC-V VPR)
+  </Card>
+  <Card title="Other" icon="microchip" href="/reference/targets/overview">
+    Microchip SAME51, SAMA5D3, PIC32CK, PIC32CZ, Cypress PSoC-6, Infineon AURIX TC3xx, Vorago VA416x0, Raspberry Pi Pico RP2350, TI Hercules TMS570
+  </Card>
+</CardGroup>
+
+## Simulated target
+
+wolfBoot includes a **simulator target** (`TARGET=sim`) that runs on Linux or macOS as a native executable. It uses host files to emulate internal and optional external flash, enabling full firmware update cycle testing without hardware.
+
+```bash
+cp config/examples/sim.config .config
+make
+make test-sim-internal-flash-with-update
+
+# Run wolfBoot and get version
+./wolfboot.elf success get_version
+
+# Trigger an update and verify version switch
+./wolfboot.elf update_trigger
+./wolfboot.elf success get_version
+```
+
+<Note>
+The simulator is the recommended starting point for integrating wolfBoot into a new project before porting to real hardware.
+</Note>
+
+## HAL driver index
+
+Each target maps to a C source file under `hal/`:
+
+| Family | HAL file(s) |
+|--------|-------------|
+| STM32F4 | `hal/stm32f4.c` |
+| STM32H7 | `hal/stm32h7.c` |
+| STM32L5 | `hal/stm32l5.c` |
+| STM32H5 | `hal/stm32h5.c` |
+| STM32G0 | `hal/stm32g0.c` |
+| STM32U5 | `hal/stm32u5.c` |
+| STM32WB55 | `hal/stm32wb.c` |
+| i.MX-RT | `hal/imx_rt.c` |
+| LPC54xxx | `hal/lpc.c` |
+| LPC55S69 | `hal/lpc55s69.c` |
+| MCXA153 | `hal/mcxa.c` |
+| MCXW716 | `hal/mcxw.c` |
+| MCXN947 | `hal/mcxn.c` |
+| Kinetis | `hal/kinetis.c` |
+| LS1028A | `hal/nxp_ls1028a.c` |
+| QorIQ P1021 | `hal/nxp_p1021.c` |
+| QorIQ T1024/T1040 | `hal/nxp_t10xx.c` |
+| QorIQ T2080 | `hal/nxp_t2080.c` |
+| Renesas RA | `hal/renesas-ra.c` |
+| Renesas RX | `hal/renesas-rx.c` / `hal/rx65n.c` / `hal/rx72n.c` |
+| Renesas RZ | `hal/renesas-rz.c` |
+| x86 UEFI | `hal/x86_64_efi.c` |
+| x86 FSP QEMU | `hal/x86_fsp_qemu.c` |
+| Kontron VX3060-S2 | `hal/kontron_vx3060_s2.c` |
+| Zynq UltraScale+ | `hal/zynq.c` |
+| Versal | `hal/versal.c` |
+| Raspberry Pi 3 | `hal/raspi3.c` |
+| HiFive1 | `hal/hifive1.c` |
+| PolarFire SoC | `hal/mpfs250.c` |
+| nRF52840 | `hal/nrf52.c` |
+| nRF5340 | `hal/nrf5340.c` |
+| nRF54L15 | `hal/nrf54l.c` |
+| PSoC-6 | `hal/psoc6.c` |
+| AURIX TC3xx | `hal/aurix_tc3xx.c` |
+| Vorago VA416x0 | `hal/va416x0.c` |
+| RP2350 | `hal/rp2350.c` |
+| SAME51 | `hal/same51.c` |
+| SAMA5D3 | `hal/sama5d3.c` |
+| PIC32CK | `hal/pic32ck.c` |
+| PIC32CZ | `hal/pic32cz.c` |
+| S32K1xx | `hal/s32k1xx.c` |
+| TI Hercules | `hal/ti_hercules.c` |

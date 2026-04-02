@@ -1,0 +1,204 @@
+---
+title: "wolfHSM integration"
+description: "Integrate wolfBoot with wolfHSM for secure key storage, remote cryptographic operations, and certificate chain verification."
+---
+
+wolfBoot integrates with [wolfHSM](https://github.com/wolfssl/wolfHSM) to offload cryptographic operations and key management to a dedicated Hardware Security Module. wolfBoot can operate in two modes:
+
+<CardGroup cols={2}>
+  <Card title="Client mode" icon="arrow-right-left" href="#client-mode-build">
+    wolfBoot acts as a wolfHSM client. All crypto operations and key storage are forwarded to an external wolfHSM server as remote procedure calls (RPCs).
+  </Card>
+  <Card title="Server mode" icon="server" href="#server-mode-build">
+    wolfBoot runs an embedded wolfHSM server internally. No external HSM is required; all operations happen locally within the bootloader.
+  </Card>
+</CardGroup>
+
+## Key features
+
+- **Secure key storage**: Keys used for authentication are stored on the wolfHSM server and never exposed to wolfBoot's address space.
+- **Remote cryptographic operations**: Signature verification and hashing are performed on the wolfHSM server.
+- **Flexible key management**: Keys can be updated or rotated on the HSM without requiring a wolfBoot firmware update.
+- **Certificate chain verification**: wolfBoot can verify a full certificate chain embedded in the firmware image header against a pre-provisioned root CA on the HSM.
+
+## Supported platforms
+
+| Platform | Transport |
+|---|---|
+| wolfBoot simulator | POSIX TCP (`127.0.0.1:1234`) |
+| AURIX TC3xx | Shared memory |
+
+Platform-specific setup is documented alongside the platform HAL. The sections below focus on generic configuration options and the simulator.
+
+## Client algorithm support
+
+wolfBoot supports offloading the following algorithms to the wolfHSM server:
+
+| Algorithm | Key sizes | Use |
+|---|---|---|
+| RSA | 2048, 3072, 4096 bit | Image signature verification |
+| ECDSA | P-256, P-384, P-521 | Image signature verification |
+| ML-DSA | Levels 2, 3, 5 | Image signature verification (platform-dependent) |
+| SHA-256 | — | Image integrity verification |
+
+<Note>
+Encrypted images with wolfHSM are not yet supported. Consult platform-specific documentation for algorithm availability on each target.
+</Note>
+
+## Certificate chain verification
+
+When `WOLFBOOT_CERT_CHAIN_VERIFY` is enabled, wolfBoot verifies firmware images using a certificate chain embedded in the image header rather than a raw public key.
+
+The verification process:
+
+<Steps>
+  <Step title="Provision root CA on the HSM">
+    Store the DER-encoded root CA certificate on the wolfHSM server at the NVM ID specified by the HAL `hsmNvmIdCertRootCA`. The wolfHSM server must be built with `WOLFHSM_CFG_CERTIFICATE_MANAGER`.
+  </Step>
+  <Step title="Create signing credentials">
+    Create a signing keypair and an identity certificate signed by the root CA. Optionally add intermediate certificates to form a chain.
+  </Step>
+  <Step title="Sign the firmware image">
+    Use the sign tool with `--cert-chain`, providing a DER-encoded certificate chain:
+
+    ```bash
+    ./tools/keytools/sign --ecc256 --cert-chain chain.der \
+      test-app/image.elf wolfboot_signing_private_key.der 1
+    ```
+  </Step>
+  <Step title="Boot verification">
+    At boot, wolfBoot extracts the certificate chain from the firmware header, verifies it against the root CA on the HSM, and uses the leaf certificate's public key to verify the firmware signature — all on the wolfHSM server.
+  </Step>
+</Steps>
+
+## Configuration options
+
+These options are normally set automatically by the build system for each supported platform when wolfHSM support is enabled.
+
+<AccordionGroup>
+  <Accordion title="WOLFBOOT_ENABLE_WOLFHSM_CLIENT">
+    Enables wolfHSM client support. Without this option, wolfHSM client mode is not compiled in. Mutually exclusive with `WOLFBOOT_ENABLE_WOLFHSM_SERVER`.
+  </Accordion>
+  <Accordion title="WOLFBOOT_ENABLE_WOLFHSM_SERVER">
+    Enables an embedded wolfHSM server inside wolfBoot. All HSM operations are performed locally. Mutually exclusive with `WOLFBOOT_ENABLE_WOLFHSM_CLIENT`.
+  </Accordion>
+  <Accordion title="WOLFBOOT_USE_WOLFHSM_PUBKEY_ID">
+    Uses the reserved wolfHSM public key ID (`hsmKeyIdPubKey`) from the HAL for firmware authentication. Use this with `--nolocalkeys` during key generation — the keystore will not be used for key material.
+
+    Without this option, wolfBoot loads key material from the keystore, sends it to the HSM as an ephemeral key at use time, then evicts it. This is useful for debugging but not for production.
+  </Accordion>
+  <Accordion title="WOLFBOOT_CERT_CHAIN_VERIFY">
+    Enables certificate chain verification mode. Requires the wolfHSM server to be built with `WOLFHSM_CFG_CERTIFICATE_MANAGER` and the root CA to be pre-provisioned at `hsmNvmIdCertRootCA`.
+  </Accordion>
+</AccordionGroup>
+
+## HAL requirements
+
+wolfHSM-enabled platforms must implement the following in addition to the standard wolfBoot HAL.
+
+### Global variables
+
+| Variable | Mode | Description |
+|---|---|---|
+| `hsmClientCtx` | Client | Global wolfHSM client context, initialized by the HAL |
+| `hsmServerCtx` | Server | Global wolfHSM server context, initialized by the HAL |
+| `hsmDevIdHash` | Both | HSM device ID for hash operations |
+| `hsmDevIdPubKey` | Both | HSM device ID for public key operations |
+| `hsmKeyIdPubKey` | Both | HSM key ID for the firmware verification public key |
+
+### Client HAL functions
+
+```c
+/* Initialize the connection to the wolfHSM server */
+int hal_hsm_init_connect(void);
+
+/* Disconnect and clean up the HSM client context */
+int hal_hsm_disconnect(void);
+```
+
+### Server HAL functions
+
+```c
+/* Initialize the embedded wolfHSM server */
+int hal_hsm_server_init(void);
+
+/* Clean up the embedded wolfHSM server */
+int hal_hsm_server_cleanup(void);
+```
+
+## Simulator setup
+
+### Client mode build
+
+```bash
+# Use the wolfHSM client simulator configuration
+cp config/examples/sim-wolfHSM-client.config .config
+
+# Build wolfBoot (keys are generated automatically)
+make
+
+# Build and sign the test applications
+make test-sim-internal-flash-with-update
+```
+
+The generated public key is at `wolfboot_signing_private_key_pub.der`. Load it into the wolfHSM server at the keyId specified by `hsmKeyIdPubKey` before running.
+
+### Server mode build
+
+```bash
+# Use the wolfHSM server configuration (with certificate chain verification)
+cp config/examples/sim-wolfHSM-server-certchain.config .config
+
+# Build wolfBoot with embedded wolfHSM server
+make
+
+# Build and sign test applications (generates a dummy CA and certificate chain)
+make test-sim-internal-flash-with-update
+```
+
+## Running the simulator
+
+<Tabs>
+  <Tab title="Client mode">
+    Start the wolfHSM POSIX TCP server in one terminal, loading the wolfBoot public key:
+
+    ```bash
+    cd lib/wolfHSM/examples/posix/tcp/wh_server_tcp
+    make WOLFSSL_DIR=../../../../../wolfssl
+
+    ./Build/wh_server_tcp.elf \
+      --client 12 \
+      --id 255 \
+      --key ../../../../../../wolfboot_signing_private_key_pub.der &
+    ```
+
+    Then stage an update and verify in the wolfBoot terminal:
+
+    ```bash
+    # Stage an update and report current version
+    ./wolfboot.elf update_trigger get_version
+
+    # Boot the new firmware and confirm success
+    ./wolfboot.elf success get_version
+    ```
+  </Tab>
+  <Tab title="Server mode">
+    Create the simulated NVM image with the dummy root CA, then run:
+
+    ```bash
+    ./lib/wolfHSM/tools/whnvmtool/whnvmtool \
+      --image=wolfBoot_wolfHSM_NVM.bin \
+      --size 16348 \
+      --invert-erased-byte \
+      tools/scripts/wolfBoot-wolfHSM-sim-dummy-certchain.nvminit
+
+    # Stage an update
+    ./wolfboot.elf update_trigger get_version
+
+    # Boot the new firmware and confirm
+    ./wolfboot.elf success get_version
+    ```
+
+    The embedded wolfHSM server handles all crypto using `wolfBoot_wolfHSM_NVM.bin` for key storage.
+  </Tab>
+</Tabs>

@@ -1,0 +1,186 @@
+---
+title: 'Porting to a new target'
+description: 'Implement the Hardware Abstraction Layer (HAL) to bring up wolfBoot on a new microcontroller.'
+---
+
+wolfBoot requires a small HAL that provides flash access and clock configuration. Everything platform-specific lives in two files: a C implementation and a linker script. The steps below walk you through creating both and wiring them into the build.
+
+<Steps>
+  <Step title="Create hal/mytarget.c with the 6 required functions">
+
+Create `hal/mytarget.c`. This file must implement the six HAL functions declared in `include/hal.h`. See [HAL function reference](#hal-function-reference) below for the exact contract each function must fulfill.
+
+```c hal/mytarget.c
+#include <stdint.h>
+#include "image.h"
+
+void hal_init(void)
+{
+    /* Configure clocks, PLLs, wait states, etc. */
+}
+
+void hal_flash_unlock(void)
+{
+    /* Unlock IAP write access, e.g. write unlock keys to flash registers */
+}
+
+int hal_flash_write(uint32_t address, const uint8_t *data, int len)
+{
+    /* Write `len` bytes from `data` to flash at `address`.
+     * Must handle any size and alignment.
+     * For targets with minimum programmable size > 1 byte,
+     * implement read-modify-write logic here.
+     * Return 0 on success, negative on failure. */
+    return 0;
+}
+
+void hal_flash_lock(void)
+{
+    /* Re-enable flash write protection */
+}
+
+int hal_flash_erase(uint32_t address, int len)
+{
+    /* Erase flash sectors covering [address, address+len).
+     * `address` is guaranteed aligned to WOLFBOOT_SECTOR_SIZE.
+     * `len` is guaranteed a multiple of WOLFBOOT_SECTOR_SIZE.
+     * Return 0 on success, negative on failure. */
+    return 0;
+}
+
+void hal_prepare_boot(void)
+{
+    /* Restore clocks and peripherals to reset state before
+     * handing off to the application. */
+}
+```
+
+  </Step>
+  <Step title="Create hal/mytarget.ld linker script with flash and RAM regions">
+
+Create `hal/mytarget.ld`. The linker script defines memory regions for the bootloader and exports the symbols wolfBoot uses to locate flash and RAM boundaries.
+
+```ld hal/mytarget.ld
+MEMORY
+{
+    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 32K
+    RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = 8K
+}
+
+SECTIONS
+{
+    .text :
+    {
+        _start_text = .;
+        KEEP(*(.isr_vector))
+        *(.text*)
+        *(.rodata*)
+        _end_text = .;
+    } > FLASH
+
+    .data :
+    {
+        _start_data = .;
+        *(.data*)
+        _end_data = .;
+    } > RAM AT > FLASH
+
+    .bss :
+    {
+        _start_bss = .;
+        *(.bss*)
+        *(COMMON)
+        _end_bss = .;
+    } > RAM
+
+    _stored_data = LOADADDR(.data);
+}
+```
+
+Adjust `ORIGIN` and `LENGTH` to match your device's memory map.
+
+  </Step>
+  <Step title="Define partition layout in .config">
+
+Add a `.config` file (or extend an existing one) that sets the partition addresses and sizes for your target.
+
+```makefile .config
+TARGET=mytarget
+ARCH=ARM
+
+WOLFBOOT_PARTITION_BOOT_ADDRESS=0x08008000
+WOLFBOOT_PARTITION_SIZE=0x40000
+WOLFBOOT_PARTITION_UPDATE_ADDRESS=0x08048000
+WOLFBOOT_PARTITION_SWAP_ADDRESS=0x08088000
+WOLFBOOT_SECTOR_SIZE=0x8000
+```
+
+<Note>
+All addresses and sizes must be aligned to `WOLFBOOT_SECTOR_SIZE`. The boot, update, and swap partitions must not overlap each other or the bootloader region.
+</Note>
+
+  </Step>
+  <Step title="Build with TARGET=mytarget">
+
+```bash
+make TARGET=mytarget
+```
+
+Or, if you are using a `.config` file:
+
+```bash
+make
+```
+
+The build system picks up `hal/mytarget.c` and `hal/mytarget.ld` automatically based on the `TARGET` value.
+
+  </Step>
+</Steps>
+
+---
+
+## HAL function reference
+
+Each function below must be implemented in your `hal/mytarget.c`.
+
+### `void hal_init(void)`
+
+Called at the very beginning of bootloader execution. Configure clocks, PLLs, flash wait states, and anything else required to run the MCU at full speed. Faster execution shortens the time spent verifying firmware signatures.
+
+### `void hal_flash_unlock(void)`
+
+Called before every write and erase operation. Unlock the IAP interface by writing the appropriate unlock sequence to the flash controller registers. On targets that do not require unlocking, this function may be empty.
+
+### `int hal_flash_write(uint32_t address, const uint8_t *data, int len)`
+
+Write `len` bytes from `data` to flash starting at `address`. The function must handle writes of any size and alignment. On targets where the minimum programmable unit is larger than one byte, implement read-modify-write logic to support unaligned single-byte writes. Returns `0` on success, a negative value on failure.
+
+### `void hal_flash_lock(void)`
+
+Called after every write and erase operation. Restore flash write protection by re-enabling the lock bits in the flash controller.
+
+### `int hal_flash_erase(uint32_t address, int len)`
+
+Erase the flash region `[address, address + len)`. `address` is guaranteed to be aligned to `WOLFBOOT_SECTOR_SIZE` and `len` is guaranteed to be a multiple of `WOLFBOOT_SECTOR_SIZE`. The implementation must translate this range into one or more sector erase commands, accounting for the physical sector geometry. Returns `0` on success, a negative value on failure.
+
+### `void hal_prepare_boot(void)`
+
+Called immediately before wolfBoot hands off execution to the application. Use this to revert any clock or peripheral configuration changes made in `hal_init`, so that the application starts with the hardware in a known state. Set `WOLFBOOT_RESTORE_CLOCK=0` to disable automatic clock restoration if your application manages clocks itself.
+
+---
+
+## Optional: external flash support
+
+If your update or swap partition lives on an external memory device (SPI flash, QSPI, etc.), build with `EXT_FLASH=1` and also define `PART_UPDATE_EXT` and/or `PART_SWAP_EXT`. You must then implement five additional functions in your HAL file:
+
+| Function | Description |
+|---|---|
+| `int ext_flash_write(uintptr_t address, const uint8_t *data, int len)` | Write to external device |
+| `int ext_flash_read(uintptr_t address, uint8_t *data, int len)` | Read from external device |
+| `int ext_flash_erase(uintptr_t address, int len)` | Erase sectors on external device |
+| `void ext_flash_lock(void)` | Lock external device (may be empty) |
+| `void ext_flash_unlock(void)` | Unlock external device (may be empty) |
+
+<Note>
+`EXT_FLASH=1` is incompatible with `NVM_FLASH_WRITEONCE`.
+</Note>

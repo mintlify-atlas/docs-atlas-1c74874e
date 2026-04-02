@@ -1,0 +1,521 @@
+---
+title: "STM32 Targets"
+description: "wolfBoot support for STM32 microcontrollers including STM32F4, STM32H7, STM32L5, STM32H5, STM32G0, STM32U5, STM32WB55, STM32F7, STM32F1, STM32L4, STM32L0, and STM32C0."
+---
+
+wolfBoot supports the full range of STM32 microcontroller families. All STM32 targets use the ARM GNU toolchain and are programmed via ST-Link or OpenOCD. TrustZone-M is available on Cortex-M33 based devices (STM32L5, STM32U5, STM32H5).
+
+<Tabs>
+  <Tab title="STM32F4">
+
+## STM32F4
+
+Example 512 KB partitioning on STM32-F407:
+
+```c
+#define WOLFBOOT_SECTOR_SIZE              0x20000
+#define WOLFBOOT_PARTITION_SIZE           0x20000
+
+#define WOLFBOOT_PARTITION_BOOT_ADDRESS   0x20000
+#define WOLFBOOT_PARTITION_UPDATE_ADDRESS 0x40000
+#define WOLFBOOT_PARTITION_SWAP_ADDRESS   0x60000
+```
+
+The entry point for runnable firmware is `0x20100` — 256 bytes after the start of the boot partition, to account for the firmware image header.
+
+The swap space must be at least 128 KB on this device to satisfy flash sector alignment.
+
+**Example config:** `config/examples/stm32f407-discovery.config`
+
+### Build
+
+```bash
+cp config/examples/stm32f407-discovery.config .config
+make
+```
+
+### Flash
+
+```bash
+st-flash write factory.bin 0x08000000
+```
+
+### Debug
+
+```bash
+# Start GDB server (choose one)
+openocd --file ./config/openocd/openocd_stm32f4.cfg
+# OR
+st-util -p 3333
+
+# Connect with GDB
+arm-none-eabi-gdb
+add-symbol-file test-app/image.elf 0x20100
+mon reset init
+b main
+c
+```
+
+  </Tab>
+  <Tab title="STM32F7">
+
+## STM32F7
+
+The STM32F76x and STM32F77x offer dual-bank hardware-assisted swapping. wolfBoot can use this to perform updates without a swap partition.
+
+Example 2 MB partitioning on STM32-F769 (dual-bank):
+
+```c
+#define WOLFBOOT_SECTOR_SIZE              0x20000
+#define WOLFBOOT_PARTITION_SIZE           0x40000
+
+#define WOLFBOOT_PARTITION_BOOT_ADDRESS   0x08020000
+#define WOLFBOOT_PARTITION_UPDATE_ADDRESS 0x08120000
+#define WOLFBOOT_PARTITION_SWAP_ADDRESS   0x0   /* Unused — hw-assisted swap */
+```
+
+Bank layout:
+- Bank A: `0x08000000` – `0x080FFFFF` (1 MB)
+- Bank B: `0x08100000` – `0x081FFFFF` (1 MB)
+
+**Example config:** `config/examples/stm32f7.config`, `config/examples/stm32f7-dualbank.config`
+
+### Build
+
+```bash
+make TARGET=stm32f7 DUALBANK_SWAP=1 RAM_CODE=1
+```
+
+<Note>
+`RAMCODE=1` is required when using `DUALBANK_SWAP=1` because some code must run from RAM during the bank swap operation.
+</Note>
+
+### Flash (via OpenOCD)
+
+```
+telnet localhost 4444
+flash write_image unlock erase wolfboot.bin 0x08000000
+flash write_image unlock erase test-app/image_v1_signed.bin 0x08020000
+reset
+```
+
+  </Tab>
+  <Tab title="STM32H7">
+
+## STM32H7
+
+Example 2 MB partitioning on STM32-H753:
+
+```
+WOLFBOOT_SECTOR_SIZE?=0x20000
+WOLFBOOT_PARTITION_SIZE?=0xD0000
+WOLFBOOT_PARTITION_BOOT_ADDRESS?=0x8020000
+WOLFBOOT_PARTITION_UPDATE_ADDRESS?=0x80F0000
+WOLFBOOT_PARTITION_SWAP_ADDRESS?=0x81C0000
+```
+
+**Example config:** `config/examples/stm32h7.config`
+
+### Build
+
+```bash
+make TARGET=stm32h7 SIGN=ECC256
+```
+
+### QSPI external flash
+
+The STM32H7 supports QSPI for external flash. Enable with `QSPI_FLASH=1` in your configuration. Pin definitions are in `hal/spi/spi_drv_stm32.h`. Use `QSPI_ALT_CONFIGURATION` for an alternate pin layout.
+
+**Example config:** `config/examples/stm32h7-octospi.config`
+
+### OTP key storage
+
+wolfBoot can store public keys in the STM32H7 one-time programmable flash area using `FLASH_OTP_KEYSTORE=1`. Once written, keys can be write-protected permanently.
+
+### Flash
+
+```bash
+st-flash write factory.bin 0x08000000
+# OR separately:
+st-flash write wolfboot.bin 0x08000000
+st-flash write test-app/image_v1_signed.bin 0x08020000
+```
+
+### Debug
+
+```bash
+# Start GDB server
+st-util -p 3333
+# OR
+ST-LINK_gdbserver -d -e -r 1 -p 3333
+
+# Connect with GDB
+arm-none-eabi-gdb
+add-symbol-file test-app/image.elf 0x08020000
+mon reset init
+b main
+c
+```
+
+  </Tab>
+  <Tab title="STM32L5">
+
+## STM32L5
+
+The STM32L5 is a Cortex-M33 with TrustZone-M. wolfBoot supports three scenarios.
+
+**Tested board:** STM32L562E-DK (MB1373)
+
+**Example configs:**
+- `config/examples/stm32l5.config` — TrustZone enabled
+- `config/examples/stm32l5-wolfcrypt-tz.config` — TrustZone + wolfCrypt NSC
+- `config/examples/stm32l5-nonsecure-dualbank.config` — TrustZone disabled, dual bank
+
+### Scenario 1: TrustZone enabled
+
+Option bytes required:
+
+```
+TZEN = 1
+DBANK = 1
+SECWM1_STRT=0x0  SECWM1_END=0x7F   (all 128 pages of Bank1 secure)
+SECWM2_STRT=0x1  SECWM2_END=0x0    (Bank2 non-secure)
+```
+
+<Steps>
+  <Step title="Copy config and build">
+    ```bash
+    cp ./config/examples/stm32l5.config .config
+    make
+    ```
+  </Step>
+  <Step title="Configure option bytes">
+    ```bash
+    STM32_Programmer_CLI -c port=swd mode=hotplug -ob TZEN=1 DBANK=1
+    STM32_Programmer_CLI -c port=swd mode=hotplug -ob SECWM1_STRT=0x0 SECWM1_END=0x7F SECWM2_STRT=0x1 SECWM2_END=0x0
+    ```
+  </Step>
+  <Step title="Flash wolfBoot to secure bank">
+    ```bash
+    STM32_Programmer_CLI -c port=swd -d ./wolfboot.bin 0x0C000000
+    ```
+  </Step>
+  <Step title="Flash application to non-secure bank">
+    ```bash
+    STM32_Programmer_CLI -c port=swd -d ./test-app/image_v1_signed.bin 0x08040000
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+STM32CubeProgrammer V2.3.0 is required for STM32L5. Version 2.4.0 has a known bug.
+</Warning>
+
+### Scenario 2: wolfCrypt as secure engine (NSC)
+
+Enable with `WOLFCRYPT_TZ=1` and `WOLFCRYPT_TZ_PKCS11=1` (or `WOLFCRYPT_TZ_PSA=1`). This exposes a PKCS11 interface from the secure world to non-secure applications via non-secure callables (NSC).
+
+### Scenario 3: TrustZone disabled, dual bank
+
+Flash is segmented as:
+- Bank 0: `0x08000000`
+- Bank 1: `0x08040000`
+
+Updates are uploaded to `0x08048000`. The two partitions use `BANK_SWAP` — no separate swap partition is required.
+
+  </Tab>
+  <Tab title="STM32H5">
+
+## STM32H5
+
+Like STM32L5, the STM32H5 is Cortex-M33 with TrustZone. It also supports dual-bank hardware-assisted swap and OTP key storage.
+
+**Tested board:** NUCLEO-STM32H563ZI
+
+**Example configs:**
+- `config/examples/stm32h5.config` — TrustZone enabled (basic)
+- `config/examples/stm32h5-tz.config` — TrustZone + wolfCrypt NSC / PSA
+- `config/examples/stm32h5-dualbank.config` — dual bank (TrustZone off)
+- `config/examples/stm32h5-tz-dualbank-otp.config` — dual bank + TZ + OTP
+
+### Scenario 1: TrustZone enabled
+
+Secure region: first 384 KB. Non-secure region: remaining 640 KB.
+
+```bash
+# Enable TrustZone
+STM32_Programmer_CLI -c port=swd -ob TZEN=0xB4
+
+# Set secure watermarks (pages 0x0–0x2F secure, Bank2 non-secure)
+STM32_Programmer_CLI -c port=swd -ob SECWM1_STRT=0x0 SECWM1_END=0x2F SECWM2_STRT=0x0 SECWM2_END=0x7F
+
+# Flash wolfBoot (secure bank alias)
+STM32_Programmer_CLI -c port=swd -d wolfboot.bin 0x0C000000
+
+# Flash application (non-secure)
+STM32_Programmer_CLI -c port=swd -d test-app/image_v1_signed.bin 0x08060000
+```
+
+### OTP key storage
+
+Compile with `FLASH_OTP_KEYSTORE=1` to store authentication public keys in the OTP flash area. Keys written to OTP can be permanently write-protected. See `docs/flash-OTP.md` for the full workflow.
+
+### Dual-bank configuration
+
+```
+BANK A: 0x08000000 – 0x080FFFFF (1 MB)
+BANK B: 0x08100000 – 0x081FFFFF (1 MB)
+```
+
+Before first use, clear the `SWAP_BANK` option byte:
+
+```bash
+STM32_Programmer_CLI -c port=swd -ob SWAP_BANK=0
+```
+
+Sign and upload an update to the second bank update partition:
+
+```bash
+IMAGE_HEADER_SIZE=1024 tools/keytools/sign --ecc256 test-app/image.bin wolfboot_signing_private_key.der 3
+STM32_Programmer_CLI -c port=swd -d test-app/image_v3_signed.bin 0x08160000
+```
+
+### Debug
+
+```bash
+openocd -s /usr/local/share/openocd/scripts -f board/st_nucleo_h5.cfg
+
+arm-none-eabi-gdb
+source .gdbinit
+add-symbol-file test-app/image.elf 0x08060000
+mon reset init
+b main
+c
+```
+
+  </Tab>
+  <Tab title="STM32U5">
+
+## STM32U5
+
+The STM32U5 is a Cortex-M33 (ARMv8-M). wolfBoot supports TrustZone-enabled and non-TrustZone (dual-bank) configurations.
+
+**Tested board:** B-U585I-IOT02A (MB1551)
+
+**Example configs:**
+- `config/examples/stm32u5.config` — TrustZone enabled
+- `config/examples/stm32u5-wolfcrypt-tz.config` — TrustZone + wolfCrypt NSC
+- `config/examples/stm32u5-nonsecure-dualbank.config` — dual bank, TrustZone off
+
+<Note>
+The default `IMAGE_HEADER_SIZE` is increased to 1024 bytes on STM32U5 to avoid potential vector table alignment issues.
+</Note>
+
+### Scenario 1: TrustZone enabled
+
+Secure region: first 256 KB. Non-secure region: remaining flash.
+
+Option bytes required:
+
+```
+TZEN = 1
+DBANK = 1
+SECWM1_STRT=0x0  SECWM1_END=0x7F   (all 128 pages of Bank1 secure)
+SECWM2_STRT=0x1  SECWM2_END=0x0    (Bank2 non-secure)
+```
+
+```bash
+cp ./config/examples/stm32u5.config .config
+make TZEN=1
+STM32_Programmer_CLI -c port=swd mode=hotplug -ob TZEN=1 DBANK=1
+STM32_Programmer_CLI -c port=swd mode=hotplug -ob SECWM1_STRT=0x0 SECWM1_END=0x7F SECWM2_STRT=0x1 SECWM2_END=0x0
+STM32_Programmer_CLI -c port=swd -d ./wolfboot.bin 0x0C000000
+STM32_Programmer_CLI -c port=swd -d ./test-app/image_v1_signed.bin 0x08100000
+```
+
+### Scenario 3: Dual bank (TrustZone disabled)
+
+Bank layout:
+- Bank 0: `0x08000000`
+- Bank 1: `0x08100000`
+
+```bash
+STM32_Programmer_CLI -c port=swd -d ./wolfboot.bin 0x08000000
+STM32_Programmer_CLI -c port=swd -d ./test-app/image_v1_signed.bin 0x08010000
+```
+
+  </Tab>
+  <Tab title="STM32G0">
+
+## STM32G0
+
+Supports STM32G0x0 and STM32G0x1 devices.
+
+Example 128 KB partitioning on STM32-G070:
+
+```c
+#define WOLFBOOT_SECTOR_SIZE                 0x800   /* 2 KB */
+#define WOLFBOOT_PARTITION_BOOT_ADDRESS      0x08008000
+#define WOLFBOOT_PARTITION_SIZE              0xB000  /* 44 KB */
+#define WOLFBOOT_PARTITION_UPDATE_ADDRESS    0x08013000
+#define WOLFBOOT_PARTITION_SWAP_ADDRESS      0x0801E000
+```
+
+**Example config:** `config/examples/stm32g0.config`
+
+### Build
+
+```bash
+make TARGET=stm32g0 NVM_FLASH_WRITEONCE=1
+```
+
+<Note>
+`NVM_FLASH_WRITEONCE=1` is mandatory on STM32G0 — the IAP driver does not support multiple writes per erase cycle.
+</Note>
+
+### Secure hide protection (optional)
+
+The STM32G0 supports a hardware secure-memory feature that makes the wolfBoot partition inaccessible after the application starts. Enable `CFLAGS_EXTRA+=-DFLASH_SECURABLE_MEMORY_SUPPORT` and `RAM_CODE=1`, then set the page count:
+
+```bash
+# 32 KB bootloader = 16 pages of 2 KB
+STM32_Programmer_CLI -c port=swd mode=hotplug -ob SEC_SIZE=0x10
+```
+
+### Flash
+
+```bash
+STM32_Programmer_CLI -c port=swd -d factory.bin 0x08000000
+```
+
+  </Tab>
+  <Tab title="STM32WB55">
+
+## STM32WB55
+
+Example partitioning on the Nucleo-68 board:
+
+```c
+#define WOLFBOOT_SECTOR_SIZE                 0x1000   /* 4 KB */
+#define WOLFBOOT_PARTITION_BOOT_ADDRESS      0x8000
+#define WOLFBOOT_PARTITION_SIZE              0x20000  /* 128 KB */
+#define WOLFBOOT_PARTITION_UPDATE_ADDRESS    0x28000
+#define WOLFBOOT_PARTITION_SWAP_ADDRESS      0x48000
+```
+
+**Example configs:** `config/examples/stm32wb.config`, `config/examples/stm32wb-pka-1mb.config`
+
+### PKA hardware accelerator
+
+The STM32WB55 includes a Public Key Accelerator (PKA) that can be used to offload ECC signature verification. Enable with `PKA=1` in your configuration.
+
+### Build
+
+```bash
+make TARGET=stm32wb NVM_FLASH_WRITEONCE=1
+```
+
+<Note>
+`NVM_FLASH_WRITEONCE=1` is mandatory on STM32WB55.
+</Note>
+
+### Flash with OpenOCD
+
+```bash
+openocd --file ./config/openocd/openocd_stm32wbx.cfg
+```
+
+```
+telnet localhost 4444
+reset halt
+flash write_image unlock erase factory.bin 0x08000000
+flash verify_bank 0 factory.bin
+reset
+```
+
+### Flash with ST-Link
+
+```bash
+st-flash write factory.bin 0x08000000
+```
+
+  </Tab>
+  <Tab title="STM32C0 / L0 / L4 / F1">
+
+## STM32C0
+
+Supports STM32C0x0 and STM32C0x1. Tested on the STM Nucleo-C031C6.
+
+Example 32 KB partitioning with ED25519 or LMS-8-10-1:
+
+```c
+#define WOLFBOOT_SECTOR_SIZE                 0x800      /* 2 KB */
+#define WOLFBOOT_PARTITION_BOOT_ADDRESS      0x08002800 /* at 10 KB */
+#define WOLFBOOT_PARTITION_SIZE              0x2800     /* 10 KB */
+#define WOLFBOOT_PARTITION_UPDATE_ADDRESS    0x08005000 /* at 20 KB */
+#define WOLFBOOT_PARTITION_SWAP_ADDRESS      0x08007800 /* at 30 KB */
+```
+
+**Example configs:** `config/examples/stm32c0.config`, `config/examples/stm32c0-rsa2048.config`, `config/examples/stm32c0-lms-8-10-1.config`
+
+```bash
+make TARGET=stm32c0 NVM_FLASH_WRITEONCE=1
+STM32_Programmer_CLI -c port=swd -d factory.bin 0x08000000
+```
+
+---
+
+## STM32L0
+
+Example 192 KB partitioning on STM32-L073:
+
+```c
+#define WOLFBOOT_SECTOR_SIZE                 0x1000   /* 4 KB */
+#define WOLFBOOT_PARTITION_BOOT_ADDRESS      0x8000
+#define WOLFBOOT_PARTITION_SIZE              0x10000  /* 64 KB */
+#define WOLFBOOT_PARTITION_UPDATE_ADDRESS    0x18000
+#define WOLFBOOT_PARTITION_SWAP_ADDRESS      0x28000
+```
+
+```bash
+make TARGET=stm32l0   # CORTEX_M0 is selected automatically
+```
+
+---
+
+## STM32L4
+
+Example 1 MB partitioning on STM32L4:
+
+```c
+#define WOLFBOOT_SECTOR_SIZE                 0x1000   /* 4 KB */
+#define WOLFBOOT_PARTITION_BOOT_ADDRESS      0x0800A000
+#define WOLFBOOT_PARTITION_SIZE              0x7A000  /* 488 KB */
+#define WOLFBOOT_PARTITION_UPDATE_ADDRESS    0x08084000
+#define WOLFBOOT_PARTITION_SWAP_ADDRESS      0x080FE000
+```
+
+**Example config:** `config/examples/stm32l4-cube.config`
+
+---
+
+## STM32F1
+
+Similar to STM32F4 but for 64 KB flash. wolfBoot occupies 12 KB, followed by two 25 KB firmware partitions and a 2 KB swap:
+
+```
+WOLFBOOT_PARTITION_BOOT_ADDRESS?=0x08003000
+WOLFBOOT_PARTITION_UPDATE_ADDRESS?=0x08009400
+WOLFBOOT_PARTITION_SWAP_ADDRESS?=0x0800F800
+```
+
+**Example config:** `config/examples/stm32f1.config`
+
+Flash via the STM32 built-in UART bootloader (BOOT0 pin high):
+
+```bash
+stm32flash -w factory.bin -b 115200 -g 0 /dev/ttyUSB0
+```
+
+  </Tab>
+</Tabs>

@@ -1,0 +1,265 @@
+---
+title: "Firmware signing"
+description: "Sign wolfBoot firmware images using the keygen and sign key tools, covering all supported algorithms, delta updates, external signing, and CI automation patterns."
+---
+
+wolfBoot authenticates every firmware image using a digital signature embedded in the image manifest header. The `keygen` and `sign` tools run on your PC or CI server and produce signed binaries that wolfBoot verifies at boot time.
+
+## Signing workflow
+
+<Steps>
+  <Step title="Build the key tools">
+    Build `keygen` and `sign` from the wolfBoot root:
+
+    ```bash
+    make keytools
+    ```
+
+    The binaries are placed in `tools/keytools/`. On Windows, open `IDE/VisualStudio/wolfBootSignTool.vcxproj` instead.
+  </Step>
+
+  <Step title="Generate a signing keypair">
+    Run `keygen` to create a private key and populate `src/keystore.c`:
+
+    ```bash
+    ./tools/keytools/keygen --ecc256 -g wolfboot_signing_private_key.der
+    ```
+
+    This produces:
+    - `wolfboot_signing_private_key.der` — the private key (keep secret)
+    - `src/keystore.c` — the embedded public key linked into wolfBoot
+    - `keystore.img` — a binary keystore image for external storage
+
+    See [Key Management](/security/keystore) for multi-key and OTP keystore options.
+  </Step>
+
+  <Step title="Sign the firmware image">
+    Pass the binary, private key, and version number to `sign`:
+
+    ```bash
+    ./tools/keytools/sign --ecc256 --sha256 test-app/image.bin \
+        wolfboot_signing_private_key.der 1
+    ```
+
+    The output is `test-app/image_v1_signed.bin`, which includes the manifest header followed by the firmware.
+  </Step>
+
+  <Step title="Assemble and flash">
+    Combine the wolfBoot image and signed firmware into a single factory binary:
+
+    ```bash
+    tools/bin-assemble/bin-assemble factory.bin \
+        0x0      wolfboot.bin \
+        0xc0000  test-app/image_v1_signed.bin
+    ```
+
+    Flash `factory.bin` to your target using your preferred programmer.
+  </Step>
+</Steps>
+
+## Supported algorithms
+
+<Tabs>
+  <Tab title="ECC">
+    ```bash
+    # ECC-256
+    ./tools/keytools/keygen --ecc256 -g key.der
+    ./tools/keytools/sign --ecc256 --sha256 image.bin key.der 1
+
+    # ECC-384
+    ./tools/keytools/keygen --ecc384 -g key.der
+    ./tools/keytools/sign --ecc384 --sha384 image.bin key.der 1
+
+    # ECC-521
+    ./tools/keytools/keygen --ecc521 -g key.der
+    ./tools/keytools/sign --ecc521 --sha384 image.bin key.der 1
+    ```
+  </Tab>
+  <Tab title="RSA">
+    ```bash
+    # RSA-2048
+    ./tools/keytools/keygen --rsa2048 -g key.der
+    ./tools/keytools/sign --rsa2048 --sha256 image.bin key.der 1
+
+    # RSA-3072
+    ./tools/keytools/keygen --rsa3072 -g key.der
+    ./tools/keytools/sign --rsa3072 --sha256 image.bin key.der 1
+
+    # RSA-4096
+    ./tools/keytools/keygen --rsa4096 -g key.der
+    ./tools/keytools/sign --rsa4096 --sha256 image.bin key.der 1
+    ```
+  </Tab>
+  <Tab title="EdDSA">
+    ```bash
+    # Ed25519
+    ./tools/keytools/keygen --ed25519 -g key.der
+    ./tools/keytools/sign --ed25519 --sha256 image.bin key.der 1
+
+    # Ed448
+    ./tools/keytools/keygen --ed448 -g key.der
+    ./tools/keytools/sign --ed448 --sha256 image.bin key.der 1
+    ```
+  </Tab>
+  <Tab title="Post-quantum">
+    ```bash
+    # ML-DSA (FIPS 204)
+    ./tools/keytools/keygen --ml_dsa -g key.der
+    ./tools/keytools/sign --ml_dsa --sha256 image.bin key.der 1
+
+    # LMS/HSS
+    ./tools/keytools/keygen --lms -g key.der
+    ./tools/keytools/sign --lms --sha256 image.bin key.der 1
+
+    # XMSS/XMSS^MT
+    ./tools/keytools/keygen --xmss -g key.der
+    ./tools/keytools/sign --xmss --sha256 image.bin key.der 1
+    ```
+
+    See [Post-Quantum Signatures](/security/post-quantum) for build configuration and parameter selection.
+  </Tab>
+</Tabs>
+
+## Hash digest options
+
+The default digest is SHA-256. Override with:
+
+| Flag | Algorithm |
+|------|-----------|
+| `--sha256` | SHA-256 (default) |
+| `--sha384` | SHA-384 |
+| `--sha3` | SHA3-384 |
+
+## Delta updates
+
+Delta (incremental) updates reduce the size of update packages by transmitting only the binary diff between two versions. wolfBoot uses Bentley-McIlroy compression.
+
+```bash
+# Sign the new image and produce a diff against the currently running image
+./tools/keytools/sign --ecc256 --sha256 \
+    --delta image_v1_signed.bin \
+    image_v2.bin wolfboot_signing_private_key.der 2
+```
+
+The output is `image_v2_signed_diff.bin`. Transfer this smaller file to the device instead of the full image.
+
+<Note>
+  By default, the sign tool embeds the SHA digest of the base image in the manifest so wolfBoot rejects mismatched base images. Use `--no-base-sha` to omit the digest when the manifest header does not have space for it.
+</Note>
+
+## Overriding the manifest header size
+
+The sign tool selects a default `IMAGE_HEADER_SIZE` based on the algorithm. To override it, set the environment variable before running the tool:
+
+```bash
+IMAGE_HEADER_SIZE=2048 ./tools/keytools/sign --ecc256 --sha256 image.bin key.der 1
+```
+
+## Signing with an external key (HSM)
+
+When the private key lives in an HSM or signing service, use a three-phase approach: generate a digest, sign it externally, then assemble the final image.
+
+```bash
+# Phase 1 — export the public key and import it into the keystore
+openssl rsa -inform DER -outform DER -in my_key.der -out rsa2048_pub.der -pubout
+./tools/keytools/keygen --rsa2048 -i rsa2048_pub.der
+
+# Phase 2 — produce a digest for external signing
+./tools/keytools/sign --rsa2048 --sha-only --sha256 \
+    test-app/image.bin rsa2048_pub.der 1
+# Outputs: test-app/image_v1_digest.bin
+
+# Phase 3 — sign the digest with your HSM (example using OpenSSL)
+openssl pkeyutl -sign -keyform der -inkey my_key.der \
+    -in test-app/image_v1_digest.bin > test-app/image_v1.sig
+
+# Phase 4 — assemble the final signed binary
+./tools/keytools/sign --rsa2048 --sha256 --manual-sign \
+    test-app/image.bin rsa2048_pub.der 1 test-app/image_v1.sig
+```
+
+## Signing with Azure Key Vault
+
+wolfBoot supports using Azure Key Vault as the signing backend. See the [Azure Key Vault guide](https://github.com/wolfSSL/wolfBoot/blob/master/docs/azure_keyvault.md) for setup instructions.
+
+## Certificate chain verification
+
+wolfBoot can verify firmware using a certificate chain instead of a raw public key. The chain is embedded in the manifest header; the leaf certificate's key signs the image. wolfBoot verifies the chain against a trusted root CA stored in wolfHSM.
+
+```bash
+make CERT_CHAIN_VERIFY=1 \
+     USER_PRIVATE_KEY=my-leaf-private-key.der \
+     USER_PUBLIC_KEY=my-leaf-pubkey.der \
+     USER_CERT_CHAIN=my-cert-chain.der
+```
+
+<Warning>
+  Certificate chain verification currently requires wolfHSM. The trusted root CA must be provisioned into the wolfHSM server before boot.
+</Warning>
+
+## CI automation patterns
+
+<AccordionGroup>
+  <Accordion title="Store the private key as a CI secret">
+    Export the DER key as a base64 string and store it in your CI provider's secret store. Decode it at signing time:
+
+    ```bash
+    # Encode (run once, store result as a secret)
+    base64 wolfboot_signing_private_key.der > key.b64
+
+    # Decode in CI before signing
+    base64 -d <<< "$WOLFBOOT_SIGNING_KEY" > wolfboot_signing_private_key.der
+    ./tools/keytools/sign --ecc256 --sha256 image.bin \
+        wolfboot_signing_private_key.der $VERSION
+    ```
+  </Accordion>
+  <Accordion title="Increment the version from the CI environment">
+    Use a build number or semantic version tag to set the wolfBoot version field:
+
+    ```bash
+    VERSION=$(git rev-list --count HEAD)
+    ./tools/keytools/sign --ecc256 --sha256 image.bin key.der $VERSION
+    ```
+  </Accordion>
+  <Accordion title="Delegate signing to an HSM-as-a-service">
+    Use `--sha-only` to produce the digest, pass it to your signing service, then use `--manual-sign` to complete the image. No private key material ever touches the CI runner.
+  </Accordion>
+  <Accordion title="Wolfboot self-update signing">
+    Sign a bootloader self-update using `--wolfboot-update` (equivalent to `--id 0`):
+
+    ```bash
+    ./tools/keytools/sign --wolfboot-update --ecc256 --sha256 \
+        wolfboot.bin wolfboot_signing_private_key.der 2
+    ```
+
+    To emit only the manifest header for external measurement:
+
+    ```bash
+    ./tools/keytools/sign --wolfboot-update --header-only \
+        wolfboot.bin wolfboot_signing_private_key.der 2
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Adding custom TLV fields
+
+The sign tool can embed arbitrary metadata into the manifest header:
+
+```bash
+# Add a fixed-width numeric field (tag 0x0030, 4 bytes, value 0x12345678)
+./tools/keytools/sign --ecc256 --sha256 \
+    --custom-tlv 0x0030 4 0x12345678 \
+    image.bin key.der 1
+
+# Add a variable-length hex buffer
+./tools/keytools/sign --ecc256 --sha256 \
+    --custom-tlv-buffer 0x0031 AABBCCDDEE \
+    image.bin key.der 1
+
+# Add an ASCII string
+./tools/keytools/sign --ecc256 --sha256 \
+    --custom-tlv-string 0x0032 "Version-1" \
+    image.bin key.der 1
+```
+
+Valid custom tags are in the range `0x0030`–`0xFEFE`.

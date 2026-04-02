@@ -1,97 +1,99 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "wolfBoot — Secure Bootloader for Embedded Systems"
+description: "A portable, OS-agnostic secure bootloader for 32-bit microcontrollers. Authenticate and update firmware safely using wolfCrypt digital signatures."
 ---
 
-## Setting up
+wolfBoot is a compact, memory-safe bootloader for embedded microcontrollers. It verifies firmware authenticity using industry-standard cryptography before handing off to your application — and provides a fail-safe mechanism to update firmware in the field without risking an unbootable device.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Build and run your first signed firmware image in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Building wolfBoot" icon="hammer" href="/building">
+    Compile wolfBoot for your target with Makefile or CMake.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Firmware Update" icon="arrows-rotate" href="/concepts/firmware-update">
+    Understand the secure update flow, slot swapping, and rollback.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/reference/api">
+    Trigger updates and confirm boot success from your application.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why wolfBoot
 
-Everything you need to create world-class documentation.
+wolfBoot is designed for resource-constrained embedded systems where security cannot be compromised. It has no dynamic memory allocation, no standard C library dependency, and a minimalist HAL that makes porting straightforward.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="Firmware Authentication" icon="shield-check" href="/security/signing">
+    ECC, RSA, Ed25519/Ed448, and post-quantum algorithms verify every image before boot.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Safe Firmware Updates" icon="cloud-arrow-down" href="/concepts/firmware-update">
+    Powerfail-safe slot-swap with automatic rollback if the new image doesn't confirm success.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="TPM Integration" icon="microchip" href="/integrations/tpm">
+    Measured boot, root of trust, and sealing/unsealing via TPM 2.0.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Post-Quantum Ready" icon="atom" href="/security/post-quantum">
+    ML-DSA, LMS/HSS, and XMSS support for future-proof firmware signing.
   </Card>
-</Columns>
+  <Card title="Encrypted Updates" icon="lock" href="/security/encrypted-partitions">
+    AES-128/256 encryption of the UPDATE partition to protect firmware in transit.
+  </Card>
+  <Card title="50+ Targets" icon="microchip" href="/reference/targets/overview">
+    STM32, NXP i.MX-RT, Renesas, RISC-V, x86-64, and many more platforms supported.
+  </Card>
+</CardGroup>
 
-## Need inspiration?
+## Get started in four steps
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Steps>
+  <Step title="Clone and initialize submodules">
+    ```bash
+    git clone https://github.com/wolfSSL/wolfBoot.git
+    cd wolfBoot
+    git submodule update --init
+    ```
+  </Step>
+  <Step title="Copy a target config and build key tools">
+    ```bash
+    cp config/examples/stm32h7.config .config
+    make keytools
+    ```
+  </Step>
+  <Step title="Build wolfBoot and sign the test application">
+    ```bash
+    make
+    ```
+    This generates keys, compiles the bootloader, compiles the test app, signs it, and creates the factory image.
+  </Step>
+  <Step title="Flash the factory image and confirm boot success in your app">
+    ```c
+    #include <wolfboot/wolfboot.h>
+
+    // Call this after your application has verified it is working correctly
+    wolfBoot_success();
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  wolfBoot supports Makefile and CMake build systems. See [Building wolfBoot](/building) for all options including IDE projects for Visual Studio and IAR.
+</Note>
+
+## Explore the documentation
+
+<CardGroup cols={2}>
+  <Card title="Flash Partitions" icon="layer-group" href="/concepts/flash-partitions">
+    Learn how BOOT, UPDATE, and SWAP partitions are laid out in flash memory.
+  </Card>
+  <Card title="Key Management" icon="key" href="/security/keystore">
+    Generate signing keys and manage the wolfBoot keystore.
+  </Card>
+  <Card title="Porting Guide" icon="plug" href="/guides/porting">
+    Implement the HAL for a new microcontroller target.
+  </Card>
+  <Card title="Supported Targets" icon="list-check" href="/reference/targets/overview">
+    Browse all supported MCU families and platform-specific configuration.
+  </Card>
+</CardGroup>

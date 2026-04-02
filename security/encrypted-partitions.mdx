@@ -1,0 +1,189 @@
+---
+title: "Encrypted partitions"
+description: "Encrypt the wolfBoot UPDATE and SWAP partitions using a pre-shared symmetric key to protect firmware update packages stored on external flash."
+---
+
+wolfBoot can encrypt the entire UPDATE partition so that firmware update packages stored on external non-volatile memory are never exposed in plaintext. The SWAP partition is also encrypted with the same key, so a full dump of external flash reveals no firmware content.
+
+## Why encrypting the UPDATE partition matters
+
+When firmware is stored on external flash (e.g., SPI NOR flash), it is physically accessible to an attacker with board access. Without encryption, an attacker can:
+
+- Extract the firmware binary and reverse-engineer it.
+- Replace the update with a crafted image (if signature verification is bypassed at the storage level).
+
+Encrypting the UPDATE partition ensures confidentiality of firmware update packages in transit and at rest on external memory. Signature verification still happens — encryption is an additional layer, not a replacement.
+
+## How it works
+
+Encryption operates at the external flash interface level inside wolfBoot:
+
+- Every **write** to an external partition is encrypted before being sent to flash.
+- Every **read** from an external partition is decrypted before being used.
+
+The application stores the already-encrypted firmware blob onto external flash as-is (using `ext_flash_write` from `libwolfboot`, which bypasses encryption from the application side). On the next boot, wolfBoot decrypts the data as it reads it, verifies the signature, and installs the update.
+
+### Supported algorithms
+
+| Algorithm | Key size | IV/nonce size | Build option |
+|-----------|----------|---------------|--------------|
+| ChaCha20-256 (default) | 32 bytes | 12 bytes | `ENCRYPT_WITH_CHACHA=1` |
+| AES-128-CTR | 16 bytes | 16 bytes | `ENCRYPT_WITH_AES128=1` |
+| AES-256-CTR | 32 bytes | 16 bytes | `ENCRYPT_WITH_AES256=1` |
+
+## Build configuration
+
+Enable encryption in your `.config`:
+
+```
+ENCRYPT=1
+```
+
+By default this selects `ENCRYPT_WITH_CHACHA=1`. To use AES instead:
+
+```
+ENCRYPT=1
+ENCRYPT_WITH_AES256=1
+```
+
+## Encrypting a firmware image
+
+The `sign` tool can sign and encrypt in one step using the `--encrypt` flag followed by a binary file containing the key and IV/nonce.
+
+### ChaCha20-256
+
+The key file must be exactly 44 bytes: 32 bytes of key followed by 12 bytes of nonce.
+
+```bash
+# Create the key+nonce file
+echo -n "0123456789abcdef0123456789abcdef0123456789ab" > enc_key.der
+
+# Sign and encrypt
+./tools/keytools/sign --encrypt enc_key.der \
+    test-app/image.bin wolfboot_signing_private_key.der 24
+```
+
+Output: `test-app/image_v24_signed_and_encrypted.bin`
+
+### AES-128-CTR
+
+The key file must be exactly 32 bytes: 16 bytes of key followed by 16 bytes of IV.
+
+```bash
+./tools/keytools/sign --aes128 --encrypt enc_key.der \
+    test-app/image.bin wolfboot_signing_private_key.der 24
+```
+
+### AES-256-CTR
+
+The key file must be exactly 48 bytes: 32 bytes of key followed by 16 bytes of IV.
+
+```bash
+# Create the key+IV file
+echo -n "0123456789abcdef0123456789abcdef0123456789abcdef" > enc_key.der
+
+# Sign and encrypt
+./tools/keytools/sign --aes256 --encrypt enc_key.der \
+    test-app/image.bin wolfboot_signing_private_key.der 24
+```
+
+Output: `test-app/image_v24_signed_and_encrypted.bin`
+
+## Key storage options
+
+The pre-shared symmetric key must be available to wolfBoot at update time. wolfBoot provides several options:
+
+<AccordionGroup>
+  <Accordion title="Internal flash (default)">
+    wolfBoot stores the key in a reserved area of internal flash. Read-out protection (RDP) on the MCU prevents external access to the key.
+
+    The application sets the key before triggering the update:
+
+    ```c
+    #include "wolfboot/wolfboot.h"
+
+    /* 32-byte key + 12-byte nonce for ChaCha20 */
+    uint8_t key[32]   = { /* received securely from backend */ };
+    uint8_t nonce[12] = { /* randomly generated */ };
+
+    wolfBoot_set_encrypt_key(key, nonce);
+    wolfBoot_update_trigger();
+    ```
+
+    The key is used exactly once and erased after the update completes.
+  </Accordion>
+  <Accordion title="TPM or HSM">
+    For stronger key protection, implement a custom key storage driver using the `CUSTOM_ENCRYPT_KEY=1` build option. Your driver is responsible for storing and retrieving the key from a TPM, HSM, or secure enclave.
+
+    Add to your `.config`:
+
+    ```
+    CUSTOM_ENCRYPT_KEY=1
+    OBJS_EXTRA=src/custom_encrypt_key.o
+    ```
+
+    Implement the following functions in your custom source file:
+
+    ```c
+    #include "wolfboot/wolfboot.h"
+    #include "image.h"
+
+    int wolfBoot_set_encrypt_key(const uint8_t *key, const uint8_t *nonce);
+    int wolfBoot_get_encrypt_key(uint8_t *key, uint8_t *nonce);
+    int wolfBoot_erase_encrypt_key(void);
+    ```
+  </Accordion>
+  <Accordion title="PKCS#11 keyvault (ARM TrustZone)">
+    On ARM TrustZone targets with `WOLFCRYPT_TZ_PKCS11` enabled, store the encryption key in wolfBoot's PKCS#11 keyvault:
+
+    ```
+    ENCRYPT=1
+    ENCRYPT_PKCS11=1
+    WOLFCRYPT_TZ=1
+    WOLFCRYPT_TZ_PKCS11=1
+    ENCRYPT_PKCS11_PIN="\x01\x02\x03\x04"
+    ```
+
+    Use the PKCS#11 API to store the key in the vault with the appropriate `CKA_ID`, then pass that ID as the `key` parameter to `wolfBoot_set_encrypt_key`.
+  </Accordion>
+</AccordionGroup>
+
+## libwolfboot API
+
+```c
+/* Set the symmetric key for the next update (key is used once, then erased) */
+int wolfBoot_set_encrypt_key(const uint8_t *key, const uint8_t *nonce);
+
+/* Erase a previously set key without triggering an update */
+int wolfBoot_erase_encrypt_key(void);
+```
+
+<Note>
+  `ext_flash_write` called from the application does **not** encrypt data. The application stores the already-encrypted update blob directly. wolfBoot handles decryption when it reads the partition during the update process.
+</Note>
+
+## Encrypted delta updates
+
+Encryption is fully compatible with delta (incremental) updates. The final delta binary is encrypted the same way as a full update image:
+
+```bash
+./tools/keytools/sign --encrypt enc_key.der \
+    --delta image_v1_signed.bin \
+    image_v2.bin wolfboot_signing_private_key.der 2
+```
+
+## Custom encryption cache buffer
+
+By default, wolfBoot allocates a RAM buffer equal to the external flash page size for encrypt/decrypt operations. To use a pre-allocated buffer at a specific address:
+
+```
+ENCRYPT_CACHE=0x20010000
+```
+
+## Encrypted self-updates
+
+When combining encryption with bootloader self-updates, the encryption algorithm must run from RAM. This requires modifying the linker script to exclude the encryption object from the flash `.text` section and include it in the RAM `.data` section. The feature has been tested with ChaCha20 on STM32L0.
+
+<Tip>
+  Refer to `hal/stm32l0_chacha_ram.ld` as a reference linker script for this configuration.
+</Tip>

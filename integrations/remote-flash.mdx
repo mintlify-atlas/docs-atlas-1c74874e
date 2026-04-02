@@ -1,0 +1,143 @@
+---
+title: "Remote flash interface"
+description: "Map wolfBoot's UPDATE and SWAP partitions to external or remote flash memory via SPI or a UART-based protocol."
+---
+
+wolfBoot's external flash abstraction lets you place the UPDATE and/or SWAP partitions on storage that is not directly addressable by the CPU: an SPI NOR flash chip, or a partition served by a neighbor system over UART. The rest of wolfBoot's update logic — signature verification, sector-by-sector swapping, rollback — is identical regardless of where the partitions live physically.
+
+## When to use external flash
+
+<CardGroup cols={2}>
+  <Card title="SPI NOR flash" icon="layers" href="#spi-flash-driver">
+    The MCU has limited internal flash. Use an external SPI NOR flash for the UPDATE partition so firmware images can be stored without sacrificing internal flash space.
+  </Card>
+  <Card title="UART remote partition" icon="arrow-right-left" href="#uart-remote-partition">
+    A co-processor or host machine holds the update image. The MCU fetches it over UART during the update cycle, without requiring a local flash chip.
+  </Card>
+</CardGroup>
+
+## Build flags
+
+| Makefile flag | Description |
+|---|---|
+| `EXT_FLASH=1` | Enable external flash support. Required for both SPI and UART modes. |
+| `PART_UPDATE_EXT` | Map the UPDATE partition to external memory (set by default when `EXT_FLASH=1`) |
+| `PART_SWAP_EXT` | Map the SWAP partition to external memory (set by default when `EXT_FLASH=1`) |
+| `SPI_FLASH=1` | Use wolfBoot's built-in SPI flash driver. Automatically defines `ext_flash_*` functions. |
+| `UART_FLASH=1` | Use the UART remote flash bridge. Automatically defines `ext_flash_*` functions. Requires `EXT_FLASH=1`. |
+| `NO_XIP=1` | Also map the BOOT partition to external memory (for MMU systems without execute-in-place). |
+
+<Warning>
+`EXT_FLASH=1` is incompatible with `NVM_FLASH_WRITEONCE`. Targets that need both must implement the sector-based read-modify-erase-write sequence at the HAL layer.
+</Warning>
+
+## External flash abstraction API
+
+When `EXT_FLASH=1` is set without `SPI_FLASH=1` or `UART_FLASH=1`, you must implement these five functions in the platform HAL. wolfBoot calls them instead of the internal `hal_flash_*` functions when accessing external partitions.
+
+```c
+/* Write len bytes from data to address (offset from device base).
+ * Returns 0 on success, negative on failure. */
+int ext_flash_write(uintptr_t address, const uint8_t *data, int len);
+
+/* Read len bytes from address into data.
+ * Returns number of bytes read on success, negative on failure. */
+int ext_flash_read(uintptr_t address, uint8_t *data, int len);
+
+/* Erase len bytes starting at address.
+ * Must handle sector geometry and erase all sectors in the range.
+ * Subject to the same restrictions as hal_flash_erase(). */
+int ext_flash_erase(uintptr_t address, int len);
+
+/* Restore flash write protection after a write or erase. */
+void ext_flash_lock(void);
+
+/* Unlock flash write protection before a write or erase.
+ * May be empty on drivers that do not require it. */
+void ext_flash_unlock(void);
+```
+
+<Note>
+When `SPI_FLASH=1` or `UART_FLASH=1` is used, wolfBoot provides the `ext_flash_*` implementation automatically. You only implement the lower-level driver functions described in the sections below.
+</Note>
+
+## SPI flash driver
+
+Enable SPI flash support with `EXT_FLASH=1` and `SPI_FLASH=1`. wolfBoot maps the external partitions to the SPI layer; you implement SPI primitives only.
+
+Example SPI drivers for multiple platforms are in the `hal/spi/` directory.
+
+The SPI HAL functions wolfBoot calls into depend on the target; refer to the platform-specific HAL for the expected interface. The common pattern is:
+
+```c
+/* Initialize the SPI peripheral */
+void spi_init(int polarity, int phase);
+
+/* Assert/deassert chip select */
+void spi_cs_on(uint32_t base);
+void spi_cs_off(uint32_t base);
+
+/* Transfer one byte (full-duplex) */
+uint8_t spi_xfer(uint8_t byte);
+```
+
+## UART remote partition
+
+The UART remote flash bridge lets a neighbor system (for example, a Linux host or a co-processor) serve the UPDATE partition over a serial link.
+
+### Bootloader setup
+
+Enable the feature with `UART_FLASH=1` (which also requires `EXT_FLASH=1`):
+
+```bash
+make EXT_FLASH=1 UART_FLASH=1
+```
+
+The platform HAL must provide a minimal UART driver with three functions:
+
+```c
+/* Initialize UART at the given bitrate, data bits, parity, and stop bits */
+int uart_init(uint32_t bitrate, uint8_t data, char parity, uint8_t stop);
+
+/* Transmit one byte; returns 0 on success */
+int uart_tx(const uint8_t c);
+
+/* Receive one byte into *c; returns 0 on success */
+int uart_rx(uint8_t *c);
+```
+
+Example UART drivers for supported platforms are in `hal/uart/`.
+
+### Host side: UART flash server
+
+On the host machine, run the wolfBoot UART flash server daemon. It implements the wolfBoot UART flash protocol and backs it with a local file that represents the external partition image:
+
+```bash
+# Build and start the server, pointing at a partition image file
+cd tools/uart-flash-server
+make
+./uart-flash-server /dev/ttyUSB0 115200 update_partition.bin
+```
+
+The server source is in `tools/uart-flash-server/` and targets GNU/Linux.
+
+### Update mechanism over UART
+
+wolfBoot treats the UART-backed partition identically to a local SPI flash partition. Read and write operations become RPCs over the serial link that the flash server translates into file I/O. After a successful update:
+
+- The new firmware is verified and copied from the UPDATE partition to BOOT.
+- A copy of the previous firmware is written back to the remote partition for rollback.
+
+All higher-level logic (signature verification, A/B swapping, rollback on failure) is unchanged.
+
+## Encryption for external partitions
+
+External partitions — whether SPI or UART — can be encrypted with ChaCha20. The update image is pre-encrypted at the source using the key tools, and wolfBoot decrypts it on the fly during the update.
+
+Enable encryption alongside external flash:
+
+```bash
+make EXT_FLASH=1 SPI_FLASH=1 ENCRYPT=1
+```
+
+For full details, see [Encrypted external partitions](/security/encrypted-partitions).

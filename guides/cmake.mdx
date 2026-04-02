@@ -1,0 +1,151 @@
+---
+title: 'CMake build system'
+description: 'Build wolfBoot using CMake presets or manual configuration for out-of-tree builds.'
+---
+
+wolfBoot supports CMake as an alternative to the Makefile build system. CMake presets are the preferred workflow — they keep repeatable build settings in a single JSON file so you can configure and build with short commands.
+
+<Warning>
+In-source builds are not supported. wolfBoot's `CMakeLists.txt` explicitly blocks them. Always use a separate build directory.
+</Warning>
+
+## Prerequisites
+
+- CMake 3.19 or later (required for preset support)
+- An appropriate cross-compiler toolchain (e.g. `arm-none-eabi-gcc`)
+- Python 3 (optional, for key tools and the config converter script)
+
+## Building with presets
+
+Presets are defined in `CMakePresets.json` at the wolfBoot root. Each configure preset has a matching build preset.
+
+**List available presets:**
+
+```bash
+cmake --list-presets
+```
+
+**Configure and build using a preset:**
+
+```bash
+cmake --preset stm32l4
+cmake --build --preset stm32l4
+```
+
+```bash
+cmake --preset stm32h7
+cmake --build --preset stm32h7
+```
+
+### Converting an existing .config to a preset
+
+Use the included script to convert any example config:
+
+```bash
+python3 ./tools/scripts/config2presets.py ./config/examples/stm32h7.config
+```
+
+### Custom user presets
+
+Copy `preset-examples/CMakeUserPresets.json.sample` to the wolfBoot root and rename it to `CMakeUserPresets.json`. User preset names must not conflict with built-in preset names — prefix them to be safe.
+
+```json CMakeUserPresets.json
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "my-stm32l4",
+      "displayName": "my STM32L4",
+      "inherits": ["stm32l4"],
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-my-stm32l4",
+      "cacheVariables": {
+        "ARM_GCC_BIN": "/usr/bin"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "my-stm32l4",
+      "configurePreset": "my-stm32l4"
+    }
+  ]
+}
+```
+
+<Note>
+`CMakePresets.json` may be checked into version control. `CMakeUserPresets.json` should not — add it to `.gitignore`.
+</Note>
+
+## Building with a .config file
+
+If you prefer to use an existing `.config` file instead of presets, pass `-DUSE_DOT_CONFIG=ON`:
+
+```bash
+cp ./config/examples/stm32h7.config ./.config
+
+cmake -S . -B build-stm32h7 -DUSE_DOT_CONFIG=ON
+cmake --build build-stm32h7 -j
+```
+
+If a `.config` file is already present, CMake defaults to dot-config mode automatically:
+
+```bash
+cmake -S . -B build-stm32h7
+cmake --build build-stm32h7 -j
+```
+
+## Manual configuration
+
+Specify all options directly on the command line using `-D` variables. Create the build directory first, then run `cmake` from the wolfBoot root:
+
+```bash
+mkdir build
+cmake -S . -B build \
+  -DWOLFBOOT_TARGET=stm32h7 \
+  -DWOLFBOOT_PARTITION_BOOT_ADDRESS=0x8020000 \
+  -DWOLFBOOT_SECTOR_SIZE=0x20000 \
+  -DWOLFBOOT_PARTITION_SIZE=0xD0000 \
+  -DWOLFBOOT_PARTITION_UPDATE_ADDRESS=0x80F0000 \
+  -DWOLFBOOT_PARTITION_SWAP_ADDRESS=0x81C0000 \
+  -DBUILD_TEST_APPS=yes
+cmake --build build -j
+```
+
+### Common CMake variables
+
+| Variable | Description |
+|---|---|
+| `WOLFBOOT_TARGET` | Target platform (e.g. `stm32h7`, `stm32f4`, `sim`) |
+| `WOLFBOOT_PARTITION_BOOT_ADDRESS` | Start address of the boot partition |
+| `WOLFBOOT_PARTITION_SIZE` | Size of each firmware partition |
+| `WOLFBOOT_PARTITION_UPDATE_ADDRESS` | Start address of the update partition |
+| `WOLFBOOT_PARTITION_SWAP_ADDRESS` | Start address of the swap partition |
+| `WOLFBOOT_SECTOR_SIZE` | Flash sector size |
+| `SIGN` | Signing algorithm (e.g. `ECC256`, `RSA2048`) |
+| `HASH` | Hash algorithm (e.g. `SHA256`, `SHA384`) |
+| `BUILD_TEST_APPS` | Build test applications (`yes`/`no`) |
+| `PYTHON_KEYTOOLS` | Use wolfCrypt-py key tools (`yes`/`no`) |
+
+To list all available options and their descriptions:
+
+```bash
+cmake -S . -B build -DWOLFBOOT_TARGET=stm32h7 \
+  -DWOLFBOOT_PARTITION_BOOT_ADDRESS=0x8020000 \
+  -DWOLFBOOT_SECTOR_SIZE=0x20000 \
+  -DWOLFBOOT_PARTITION_SIZE=0xD0000 \
+  -DWOLFBOOT_PARTITION_UPDATE_ADDRESS=0x80F0000 \
+  -DWOLFBOOT_PARTITION_SWAP_ADDRESS=0x81C0000 \
+  -LAH
+```
+
+## Toolchain selection
+
+If `WOLFBOOT_TARGET` is not `x86_64_efi` or `sim`, CMake automatically selects `cmake/toolchain_arm-none-eabi.cmake`. You can override this by setting `CMAKE_TOOLCHAIN_FILE` explicitly.
+
+## Tips
+
+- **Re-configure without deleting the build directory:** add `--fresh` to your `cmake` command.
+- **Visual Studio / VS Code:** both detect `CMakePresets.json` automatically. Select the preset from the status bar or CMake Tools menu.
+- **Windows host tools:** when `HOST_CC` is `cl.exe`, CMake creates a lightweight `unistd.h` shim automatically.
+- **Toolchain error `no such instruction: 'isb'`:** the wrong toolchain is selected. Verify that `WOLFBOOT_TARGET` is set and that the ARM toolchain is on your `PATH`.

@@ -1,0 +1,346 @@
+---
+title: "Hardware Abstraction Layer (HAL)"
+description: "Contract and function reference for porting wolfBoot to a new microcontroller target — flash write/erase, clock init, and optional extensions."
+keywords: ["wolfBoot", "HAL", "hardware abstraction", "flash", "porting", "microcontroller", "IAP"]
+---
+
+## Overview
+
+wolfBoot isolates every hardware-specific operation behind a Hardware Abstraction Layer (HAL). To run wolfBoot on a new microcontroller, you provide one C implementation file that satisfies this contract. The bootloader calls only the HAL functions — it never directly accesses peripheral registers.
+
+<Tree>
+  <Tree.Folder name="hal" defaultOpen>
+    <Tree.File name="stm32h5.c" />
+    <Tree.File name="stm32h5.ld" />
+    <Tree.File name="nrf5340.c" />
+    <Tree.File name="nrf5340.ld" />
+    <Tree.File name="sim.c" />
+  </Tree.Folder>
+  <Tree.File name="include/hal.h" />
+</Tree>
+
+Each file in `hal/` pairs a C implementation with a linker script (`.ld`) for the same target. The linker script exports flash and RAM boundary symbols that wolfBoot uses to place the bootloader, boot partition, and update partition.
+
+<Note>
+All HAL functions are declared in `include/hal.h`. You do not need to modify that header — implement the required functions in your target's C file.
+</Note>
+
+---
+
+## Return value conventions
+
+| Value | Meaning |
+|---|---|
+| `0` | Success. |
+| Negative integer | Failure. The specific negative value is implementation-defined but should indicate the class of error (e.g. `-1` for a generic write failure). |
+
+Functions that return `void` never fail in a recoverable way; errors are typically handled by the MCU's fault handler or by the bootloader halting.
+
+---
+
+## Required functions
+
+### `hal_init`
+
+Called once at the very start of bootloader execution, before any other HAL function.
+
+```c
+void hal_init(void);
+```
+
+Configure clocks, PLLs, flash wait states, and any other MCU peripheral that must be set up before the bootloader can operate. Run the MCU at its maximum rated frequency during boot to minimize the time spent in the cryptographic verification routines.
+
+<Tip>
+A corresponding `hal_prepare_boot()` function (see below) is called just before the bootloader hands control to application firmware. Use that function to restore the clock configuration to the reset-default state if your application expects it.
+</Tip>
+
+---
+
+### `hal_flash_unlock`
+
+Unlocks the internal flash controller's In-Application Programming (IAP) interface before a write or erase sequence.
+
+```c
+void hal_flash_unlock(void);
+```
+
+On targets where the flash controller requires an unlock key sequence before write/erase (for example most STM32 devices), implement that sequence here. On targets where no unlock is needed, this function may be left empty.
+
+wolfBoot calls `hal_flash_unlock()` immediately before every write and erase operation.
+
+---
+
+### `hal_flash_write`
+
+Writes data into internal flash using the target's IAP interface.
+
+```c
+/* 32-bit targets */
+int hal_flash_write(uint32_t address, const uint8_t *data, int len);
+
+/* 64-bit targets (ARCH_64BIT defined) */
+int hal_flash_write(uintptr_t address, const uint8_t *data, int len);
+```
+
+<ParamField path="address" type="uint32_t | uintptr_t" required>
+  Start address in flash. This is an absolute address, not a partition-relative offset.
+</ParamField>
+
+<ParamField path="data" type="const uint8_t *" required>
+  Pointer to the source buffer in RAM.
+</ParamField>
+
+<ParamField path="len" type="int" required>
+  Number of bytes to write.
+</ParamField>
+
+<ResponseField name="return" type="int">
+  `0` on success. A negative value on failure.
+</ResponseField>
+
+**Alignment requirements:** wolfBoot may call `hal_flash_write()` with any address and length, including sub-word sizes. If the flash hardware requires writes aligned to a minimum programmable unit (e.g. 8 bytes, 16 bytes), your implementation must implement read-modify-write logic to handle partial writes transparently.
+
+---
+
+### `hal_flash_lock`
+
+Re-locks the flash controller after a write or erase sequence.
+
+```c
+void hal_flash_lock(void);
+```
+
+wolfBoot calls `hal_flash_lock()` at the end of every write and erase operation. If the flash controller does not support locking, this function may be left empty.
+
+---
+
+### `hal_flash_erase`
+
+Erases a range of internal flash before writing new data.
+
+```c
+/* 32-bit targets */
+int hal_flash_erase(uint32_t address, int len);
+
+/* 64-bit targets (ARCH_64BIT defined) */
+int hal_flash_erase(uintptr_t address, int len);
+```
+
+<ParamField path="address" type="uint32_t | uintptr_t" required>
+  Start address of the region to erase. wolfBoot guarantees this value is aligned to `WOLFBOOT_SECTOR_SIZE`.
+</ParamField>
+
+<ParamField path="len" type="int" required>
+  Size in bytes of the region to erase. wolfBoot guarantees this is a multiple of `WOLFBOOT_SECTOR_SIZE`.
+</ParamField>
+
+<ResponseField name="return" type="int">
+  `0` on success. A negative value on failure.
+</ResponseField>
+
+**Sector geometry:** `address` and `len` are expressed in terms of `WOLFBOOT_SECTOR_SIZE` boundaries, but the physical flash may have larger sectors. Iterate over all physical sectors that overlap the requested range and erase each one. Do not assume that a single erase command covers exactly `WOLFBOOT_SECTOR_SIZE`.
+
+<Warning>
+Never erase the flash region that holds the bootloader itself. wolfBoot computes partition boundaries from the addresses defined in `target.h` — ensure those addresses do not overlap with the bootloader's code region.
+</Warning>
+
+---
+
+### `hal_prepare_boot`
+
+Called by the bootloader immediately before jumping to application firmware.
+
+```c
+void hal_prepare_boot(void);
+```
+
+Undo any clock or peripheral configuration performed in `hal_init()` so that the MCU is in a predictable state when application code begins executing. Most targets restore the default post-reset clock settings here.
+
+To disable clock restoration, build with `WOLFBOOT_RESTORE_CLOCK=0`. In that case this function can be empty, but it must still exist.
+
+---
+
+## Optional functions
+
+### External flash (`EXT_FLASH=1`)
+
+When `EXT_FLASH=1`, the update and/or swap partitions can reside in external memory (e.g. SPI NOR flash). Define `PART_UPDATE_EXT` and/or `PART_SWAP_EXT` to associate those partitions with external storage. You must then implement the following functions:
+
+<AccordionGroup>
+  <Accordion title="ext_flash_write">
+
+```c
+int ext_flash_write(uintptr_t address, const uint8_t *data, int len);
+```
+
+Write `len` bytes from `data` to external memory at `address`. Subject to the same alignment rules as `hal_flash_write()`. Returns `0` on success, negative on failure.
+
+  </Accordion>
+  <Accordion title="ext_flash_read">
+
+```c
+int ext_flash_read(uintptr_t address, uint8_t *data, int len);
+```
+
+Read up to `len` bytes from external memory at `address` into `data`. Must handle any size and alignment. Returns the number of bytes read on success, negative on failure.
+
+  </Accordion>
+  <Accordion title="ext_flash_erase">
+
+```c
+int ext_flash_erase(uintptr_t address, int len);
+```
+
+Erase the region of external memory starting at `address` for `len` bytes. Subject to the same sector-alignment rules as `hal_flash_erase()`. Returns `0` on success, negative on failure.
+
+  </Accordion>
+  <Accordion title="ext_flash_lock / ext_flash_unlock">
+
+```c
+void ext_flash_lock(void);
+void ext_flash_unlock(void);
+```
+
+Lock and unlock the external memory interface before and after write/erase operations. May be empty if the device does not require it.
+
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+`EXT_FLASH=1` is incompatible with the `NVM_FLASH_WRITEONCE` option.
+</Note>
+
+---
+
+### Dual-bank swap (`DUALBANK_SWAP`)
+
+Targets that support hardware-assisted bank swapping (e.g. some STM32 devices) may implement two additional functions:
+
+```c
+void hal_flash_dualbank_swap(void);
+void fork_bootloader(void);
+```
+
+`hal_flash_dualbank_swap()` triggers the hardware bank swap. On some devices this implies a reboot, so the function may never return.
+
+`fork_bootloader()` is called to ensure both banks contain an identical copy of the bootloader. It must return immediately if the bootloader copies already match.
+
+---
+
+### OTP key store (`FLASH_OTP_KEYSTORE`)
+
+When `FLASH_OTP_KEYSTORE` is defined, wolfBoot reads the public key from a one-time-programmable (OTP) region. Implement the following functions:
+
+```c
+int hal_flash_otp_write(uint32_t flashAddress, const void *data, uint16_t length);
+int hal_flash_otp_set_readonly(uint32_t flashAddress, uint16_t length);
+int hal_flash_otp_read(uint32_t flashAddress, void *data, uint32_t length);
+```
+
+`hal_flash_otp_write()` programs OTP bytes. `hal_flash_otp_set_readonly()` locks the region permanently. `hal_flash_otp_read()` reads back OTP content.
+
+---
+
+### Dual-boot address query (`WOLFBOOT_DUALBOOT`)
+
+```c
+void *hal_get_primary_address(void);
+void *hal_get_update_address(void);
+```
+
+Return the base addresses of the primary and update partitions respectively. Used when wolfBoot is configured for dual-boot operation without a fixed partition layout.
+
+---
+
+## Minimal HAL skeleton
+
+The following skeleton compiles for a generic ARM Cortex-M target and stubs every required function. Replace each section with the platform-specific register accesses and IAP sequences for your MCU.
+
+```c
+/* hal/my_target.c — minimal wolfBoot HAL for MY_TARGET */
+
+#include <stdint.h>
+#include "hal.h"
+
+/* ------------------------------------------------------------------ */
+/* hal_init: configure clocks to maximum rated frequency               */
+/* ------------------------------------------------------------------ */
+void hal_init(void)
+{
+    /* TODO: configure PLL, set flash wait states, enable caches */
+}
+
+/* ------------------------------------------------------------------ */
+/* hal_prepare_boot: restore MCU to reset-default state               */
+/* ------------------------------------------------------------------ */
+void hal_prepare_boot(void)
+{
+    /* TODO: restore default clock settings so the application starts
+     *       in a known state */
+}
+
+/* ------------------------------------------------------------------ */
+/* hal_flash_unlock: unlock IAP before write/erase                    */
+/* ------------------------------------------------------------------ */
+void hal_flash_unlock(void)
+{
+    /* Example: write unlock key sequence to FLASH_KEYR register */
+    /* FLASH->KEYR = FLASH_KEY1; */
+    /* FLASH->KEYR = FLASH_KEY2; */
+}
+
+/* ------------------------------------------------------------------ */
+/* hal_flash_lock: re-lock IAP after write/erase                      */
+/* ------------------------------------------------------------------ */
+void hal_flash_lock(void)
+{
+    /* Example: set the LOCK bit */
+    /* FLASH->CR |= FLASH_CR_LOCK; */
+}
+
+/* ------------------------------------------------------------------ */
+/* hal_flash_write: write len bytes from data to flash at address     */
+/* ------------------------------------------------------------------ */
+int hal_flash_write(uint32_t address, const uint8_t *data, int len)
+{
+    /* TODO: implement IAP write, handling alignment and minimum
+     *       programmable unit with read-modify-write if needed.
+     *
+     * Return 0 on success, negative on failure.
+     */
+    (void)address; (void)data; (void)len;
+    return -1; /* replace with real implementation */
+}
+
+/* ------------------------------------------------------------------ */
+/* hal_flash_erase: erase len bytes of flash starting at address      */
+/* ------------------------------------------------------------------ */
+int hal_flash_erase(uint32_t address, int len)
+{
+    /* TODO: iterate over physical sectors that cover [address, address+len)
+     *       and erase each one via the IAP interface.
+     *
+     * address is guaranteed to be WOLFBOOT_SECTOR_SIZE-aligned.
+     * len is guaranteed to be a multiple of WOLFBOOT_SECTOR_SIZE.
+     *
+     * Return 0 on success, negative on failure.
+     */
+    (void)address; (void)len;
+    return -1; /* replace with real implementation */
+}
+```
+
+### Linker script requirements
+
+Pair your HAL C file with a linker script (`hal/my_target.ld`) that exports at minimum:
+
+```c
+/* Symbols consumed by wolfBoot's partition layout logic */
+WOLFBOOT_PARTITION_BOOT_ADDRESS   = 0x08020000;
+WOLFBOOT_PARTITION_UPDATE_ADDRESS = 0x08060000;
+WOLFBOOT_PARTITION_SWAP_ADDRESS   = 0x080A0000;
+WOLFBOOT_PARTITION_SIZE           = 0x00040000;
+WOLFBOOT_SECTOR_SIZE              = 0x00002000;
+```
+
+Set these values to match the physical flash layout of your target and the partition sizes defined in your wolfBoot configuration.

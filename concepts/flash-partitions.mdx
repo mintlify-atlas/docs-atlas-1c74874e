@@ -1,0 +1,181 @@
+---
+title: "Flash Partitions"
+description: "How wolfBoot divides flash memory into BOOT, UPDATE, and SWAP partitions, how partition state is tracked, and the alignment rules you must follow."
+---
+
+wolfBoot divides the device's flash memory into a small number of fixed-purpose partitions. Getting the layout right is a prerequisite for successful integration: boundaries must align to physical erase sectors, and the BOOT and UPDATE partitions must be the same size.
+
+## The three partitions
+
+<CardGroup cols={3}>
+  <Card title="BOOT" icon="play-circle">
+    The only partition wolfBoot can boot from. The active firmware always runs
+    from here. The entry point is at `WOLFBOOT_PARTITION_BOOT_ADDRESS + IMAGE_HEADER_SIZE`.
+  </Card>
+  <Card title="UPDATE" icon="inbox">
+    Where the running application stores a newly received firmware image. On the
+    next reboot, the bootloader validates and swaps this image into BOOT.
+  </Card>
+  <Card title="SWAP" icon="arrow-left-right">
+    Temporary scratch space used during the sector-by-sector swap. Must be at
+    least as large as the biggest sector in BOOT or UPDATE.
+  </Card>
+</CardGroup>
+
+The flash map also includes a small **bootloader partition** at the very beginning of flash (typically 16–32 KB) that holds the wolfBoot binary and its embedded public keys.
+
+## Flash map layout
+
+```
+Flash start (e.g. 0x08000000)
+┌─────────────────────────────┐
+│  wolfBoot (bootloader)      │  ~16–32 KB at ARCH_FLASH_OFFSET
+├─────────────────────────────┤  WOLFBOOT_PARTITION_BOOT_ADDRESS
+│  BOOT partition             │
+│  ├─ Manifest header         │  IMAGE_HEADER_SIZE bytes
+│  └─ Firmware binary         │
+│  [trailer at end of sector] │
+├─────────────────────────────┤  WOLFBOOT_PARTITION_UPDATE_ADDRESS
+│  UPDATE partition           │  same size as BOOT
+│  ├─ Manifest header         │
+│  └─ Firmware binary         │
+│  [sector flags + state]     │
+├─────────────────────────────┤  WOLFBOOT_PARTITION_SWAP_ADDRESS
+│  SWAP partition             │  WOLFBOOT_SECTOR_SIZE bytes
+└─────────────────────────────┘
+```
+
+## STM32F407-Discovery example
+
+The STM32F407-Discovery reference configuration (`config/examples/stm32f407-discovery.config`) uses 128 KB sectors:
+
+```makefile
+# config/examples/stm32f407-discovery.config
+ARCH                           = ARM
+TARGET                         = stm32f4
+SIGN                           = ED25519
+HASH                           = SHA256
+
+WOLFBOOT_SECTOR_SIZE           = 0x20000   # 128 KB — one flash sector
+WOLFBOOT_PARTITION_SIZE        = 0x20000   # 128 KB — fits one sector exactly
+WOLFBOOT_PARTITION_BOOT_ADDRESS   = 0x08020000
+WOLFBOOT_PARTITION_UPDATE_ADDRESS = 0x08040000
+WOLFBOOT_PARTITION_SWAP_ADDRESS   = 0x08060000
+```
+
+```
+0x08000000  ┌──────────────────────┐
+            │  wolfBoot (128 KB)   │
+0x08020000  ├──────────────────────┤  ← BOOT
+            │  BOOT partition      │  128 KB
+0x08040000  ├──────────────────────┤  ← UPDATE
+            │  UPDATE partition    │  128 KB
+0x08060000  ├──────────────────────┤  ← SWAP
+            │  SWAP partition      │  128 KB (= WOLFBOOT_SECTOR_SIZE)
+0x08080000  └──────────────────────┘
+```
+
+## Configuring `target.h`
+
+All partition addresses and sizes are defined in `include/target.h` for your board:
+
+```c
+/* include/target.h */
+#define WOLFBOOT_SECTOR_SIZE                0x20000
+#define WOLFBOOT_PARTITION_SIZE             0x20000
+
+#define WOLFBOOT_PARTITION_BOOT_ADDRESS     0x08020000
+#define WOLFBOOT_PARTITION_UPDATE_ADDRESS   0x08040000
+#define WOLFBOOT_PARTITION_SWAP_ADDRESS     0x08060000
+```
+
+<Note>
+  When porting to a new target, generate `target.h` from the wolfBoot build
+  system (`make target.h`) rather than writing it by hand. This ensures
+  `IMAGE_HEADER_SIZE` is consistent with the chosen algorithm and key size.
+</Note>
+
+## Partition flags and state tracking
+
+Each partition stores a **1-byte state field** and a set of **4-bit sector flags** at the end of the partition area. These structures are what make updates resumable across power failures.
+
+### State byte
+
+| Constant | Value | Partition | Meaning |
+|---|---|---|---|
+| `IMG_STATE_NEW` | `0xFF` | BOOT / UPDATE | Erased state; image present but not yet staged |
+| `IMG_STATE_UPDATING` | `0x70` | UPDATE only | Marked for swap on next reboot |
+| `IMG_STATE_TESTING` | `0x10` | BOOT only | Swap complete; awaiting application confirmation |
+| `IMG_STATE_SUCCESS` | `0x00` | BOOT only | Application confirmed the update |
+
+### Sector flags
+
+Starting from the state byte and growing backwards, wolfBoot stores 4 bits per sector to record the state of each individual sector swap:
+
+| Flag constant | Value | Meaning |
+|---|---|---|
+| `SECT_FLAG_NEW` | `0x0F` | Sector not yet touched |
+| `SECT_FLAG_SWAPPING` | `0x07` | Sector copy from BOOT → SWAP in progress |
+| `SECT_FLAG_BACKUP` | `0x03` | Sector backed up to SWAP; ready to write UPDATE → BOOT |
+| `SECT_FLAG_UPDATED` | `0x00` | Sector swap complete |
+
+The trailer layout at the end of the UPDATE partition:
+
+```
+  ← end of partition
+  | 4-bit flag (sector N) | … | 4-bit flag (sector 1) | 4-bit flag (sector 0) |
+  | 1-byte partition state |
+  | 4-byte trailer magic "BOOT" |
+```
+
+## FLAGS_HOME option
+
+By default, sector flags are written at the end of the UPDATE partition. When the `FLAGS_HOME` build option is set, **all** flags are stored at the end of the BOOT partition instead:
+
+```
+BOOT partition end layout with FLAGS_HOME:
+
+  / -12      / -8       / -4      / END
+  | MAGIC    |X|X|X| PB | MAGIC  |
+               ^-- boot partition flag
+  |Sn|…|S2|S1|S0| PU |
+   ^--- sector flags   ^--- update partition flag
+```
+
+<Tip>
+  Use `FLAGS_HOME` on targets where the UPDATE partition resides in external
+  flash that is less reliable for small writes, or when you want all metadata
+  in a single internally-controlled region.
+</Tip>
+
+## Custom partition trailer
+
+If neither the default nor `FLAGS_HOME` layout suits your hardware, you can replace the trailer implementation entirely:
+
+1. Add `CFLAGS_EXTRA += -DCUSTOM_PARTITION_TRAILER` to your `.config`.
+2. Provide a `.c` file that implements `get_trailer_at`, `set_trailer_at`, and `set_partition_magic`.
+3. Add the object to your build: `OBJS_EXTRA = src/custom_trailer.o`.
+
+## Sector alignment requirements
+
+<Warning>
+  Partition boundaries **must** be aligned to physical flash erase sectors.
+  wolfBoot erases entire sectors before writing, so any misalignment will
+  corrupt data outside the intended partition. Verify alignment against the
+  target's flash sector map before finalizing `target.h`.
+</Warning>
+
+Additional constraints:
+
+- `BOOT` and `UPDATE` must be **exactly the same size**.
+- `SWAP` must be **at least as large as the largest sector** in either BOOT or UPDATE.
+- `WOLFBOOT_SECTOR_SIZE` must be **larger than `IMAGE_HEADER_SIZE`** — this is enforced by a compile-time assertion in `image.h`.
+
+<CardGroup cols={2}>
+  <Card title="Firmware image format" icon="file-code" href="/concepts/firmware-image">
+    The manifest header that lives at the start of every partition.
+  </Card>
+  <Card title="Firmware update" icon="arrow-up-circle" href="/concepts/firmware-update">
+    The swap procedure that moves images between partitions.
+  </Card>
+</CardGroup>

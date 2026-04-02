@@ -1,0 +1,435 @@
+---
+title: "Building wolfBoot"
+description: "Compile wolfBoot using the Makefile or CMake build system, configure flash partitions and signing algorithms, and build the key tools."
+keywords: ["wolfBoot", "build", "Makefile", "CMake", "keytools", "cross-compile", "TARGET", "SIGN", "flash partitions"]
+---
+
+wolfBoot supports two build systems: a traditional GNU Makefile and a modern CMake build. Both produce the same outputs: the bootloader binary, signed test firmware, and a factory image. Choose the one that fits your workflow.
+
+<Tabs>
+  <Tab title="Makefile">
+
+## Configuration file
+
+The Makefile build reads configuration from a `.config` file in the wolfBoot root directory. Copy one of the provided examples for your target:
+
+```bash
+cp config/examples/stm32h7.config .config
+```
+
+The example configs in `config/examples/` cover over 150 target variants including STM32, NXP i.MX-RT, Nordic nRF, Renesas, RISC-V, Raspberry Pi, x86-64, and a simulator target.
+
+Options in `.config` use the `?=` operator so that environment variables always take priority:
+
+```ini
+TARGET?=stm32h7
+SIGN?=ECC256
+WOLFBOOT_PARTITION_SIZE?=0xD0000
+```
+
+You can also generate a fresh config interactively:
+
+```bash
+make config
+```
+
+This prompts for each parameter and shows the current default in brackets.
+
+### Common configuration options
+
+#### Target and architecture
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `TARGET` | HAL target name (matches `hal/<TARGET>.c`) | `stm32f4` |
+| `ARCH` | Architecture (`ARM`, `ARM64`, `RISCV`, `sim`, ...) | Derived from `TARGET` |
+| `CORTEX_M0` | Set to `1` for Cortex-M0/M0+ targets | `0` |
+| `CROSS_COMPILE` | Toolchain prefix (e.g. `arm-none-eabi-`) | Derived from `ARCH` |
+
+#### Flash partitions
+
+These values must reflect the physical flash layout of your target. All addresses are absolute.
+
+| Option | Description |
+|--------|-------------|
+| `WOLFBOOT_PARTITION_BOOT_ADDRESS` | Start address of the BOOT partition |
+| `WOLFBOOT_PARTITION_UPDATE_ADDRESS` | Start address of the UPDATE partition |
+| `WOLFBOOT_PARTITION_SWAP_ADDRESS` | Start address of the SWAP partition |
+| `WOLFBOOT_PARTITION_SIZE` | Size of BOOT and UPDATE partitions (must be equal) |
+| `WOLFBOOT_SECTOR_SIZE` | Physical flash sector size (also sets SWAP partition size) |
+
+#### Signing algorithm
+
+| Option | Values | Default |
+|--------|--------|---------|
+| `SIGN` | `ED25519`, `ED448`, `ECC256`, `ECC384`, `ECC521`, `RSA2048`, `RSA3072`, `RSA4096`, `NONE` | `ED25519` |
+| `HASH` | `SHA256`, `SHA384`, `SHA3` | `SHA256` |
+
+Use `SIGN=NONE` to build a bootloader with no firmware authentication (development/testing only).
+
+#### Performance and size
+
+| Option | Description |
+|--------|-------------|
+| `NO_ASM=1` | Disable all assembly optimizations (smaller, slower) |
+| `NO_ARM_ASM=1` | Disable ARM SHA/AES assembly only (keep SP math assembly) |
+| `WOLFBOOT_SMALL_STACK=1` | Use static pool instead of stack for crypto objects |
+| `DEBUG=1` | Enable debug symbols (increases bootloader size significantly) |
+
+#### Feature flags
+
+| Option | Description |
+|--------|-------------|
+| `EXT_FLASH=1` | Enable external flash support for UPDATE/SWAP partitions |
+| `SPI_FLASH=1` | Map external partition to SPI flash driver |
+| `UART_FLASH=1` | Map external partition to UART bridge |
+| `DELTA_UPDATES=1` | Enable incremental (delta) firmware updates |
+| `NVM_FLASH_WRITEONCE=1` | Workaround for write-once flash memories |
+| `DISABLE_BACKUP=1` | Skip backup copy of running firmware before update |
+| `DUALBANK_SWAP=1` | Hardware-assisted dual-bank swap (STM32F76x/77x only) |
+| `ALLOW_DOWNGRADE=1` | Permit firmware version downgrades |
+| `RAM_CODE=1` | Execute flash-write code from RAM |
+| `FLAGS_HOME=1` | Store UPDATE partition flags in BOOT partition |
+| `FLASH_OTP_KEYSTORE=1` | Read public keys from OTP flash instead of firmware |
+
+### Common build targets
+
+```bash
+# Build the signing and key generation tools
+make keytools
+
+# Build everything: keys, bootloader, signed test app, factory image
+make
+
+# Build the bootloader binary only
+make wolfboot.bin
+
+# Build and sign the test application
+make test-app/image_v1_signed.bin
+
+# Assemble the complete factory image
+make factory.bin
+
+# Remove generated keys (forces key regeneration on next build)
+make keysclean
+
+# Full clean including built objects
+make clean
+```
+
+### Passing options on the command line
+
+Command-line options override `.config` values:
+
+```bash
+make TARGET=stm32h7 SIGN=ECC256 DEBUG=1
+```
+
+### Cross-compilation
+
+Set `CROSS_COMPILE` to your toolchain prefix:
+
+```bash
+# ARM Cortex-M
+make CROSS_COMPILE=arm-none-eabi-
+
+# QNX AArch64
+source ~/qnx700/qnxsdp-env.sh
+make CROSS_COMPILE=aarch64-unknown-nto-qnx7.0.0-
+```
+
+### Using alternate library versions
+
+wolfBoot pins its dependencies as git submodules under `lib/`. To point to a local copy of a library, use the `WOLFBOOT_LIB_*` variables (absolute paths required):
+
+```bash
+make WOLFBOOT_LIB_WOLFSSL=/home/user/wolfssl \
+     WOLFBOOT_LIB_WOLFTPM=/home/user/wolfTPM
+```
+
+Available overrides: `WOLFBOOT_LIB_WOLFSSL`, `WOLFBOOT_LIB_WOLFTPM`, `WOLFBOOT_LIB_WOLFPKCS11`, `WOLFBOOT_LIB_WOLFHSM`.
+
+### macOS note
+
+If you see `0xC3 0xBF` repeated in `factory.bin`, your shell is using a Unicode locale. Set the C locale before building:
+
+```bash
+export LANG= LC_ALL= LC_COLLATE=C LC_CTYPE=C
+make
+```
+
+  </Tab>
+  <Tab title="CMake">
+
+## CMake overview
+
+wolfBoot's CMake build requires CMake 3.19 or later. In-source builds are blocked — you must build in a separate directory.
+
+### Using presets (recommended)
+
+CMake presets store repeatable build configurations in `CMakePresets.json`. wolfBoot ships presets for many supported targets:
+
+```bash
+# List available presets
+cmake --list-presets
+
+# Configure for STM32L4
+cmake --preset stm32l4
+
+# Build
+cmake --build --preset stm32l4
+```
+
+Each configure preset has a matching build preset with `jobs=4`, `verbose=true`, and `targets=["all"]`.
+
+#### Convert an existing `.config` to a preset
+
+The `tools/scripts/config2presets.py` script converts a `.config` file to a CMake user preset:
+
+```bash
+python3 ./tools/scripts/config2presets.py ./config/examples/stm32h7.config
+```
+
+#### Custom user presets
+
+Create `CMakeUserPresets.json` in the repository root (do not commit this file) to extend or override presets:
+
+```json
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "my-stm32l4",
+      "displayName": "my STM32L4",
+      "inherits": ["stm32l4"],
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-my-stm32l4",
+      "cacheVariables": {
+        "ARM_GCC_BIN": "C:/SysGCC/arm-eabi/bin",
+        "HOST_CC": "C:/Program Files/LLVM/bin/clang.exe"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "my-stm32l4",
+      "configurePreset": "my-stm32l4"
+    }
+  ]
+}
+```
+
+Prefix all custom preset names (e.g. `my-`) to avoid conflicts with the built-in preset names.
+
+### Using a `.config` file with CMake
+
+If you prefer `.config` files over presets, pass `-DUSE_DOT_CONFIG=ON`:
+
+```bash
+cp config/examples/stm32h7.config .config
+cmake -S . -B build-stm32h7 -DUSE_DOT_CONFIG=ON
+cmake --build build-stm32h7 -j
+```
+
+If a `.config` already exists, CMake detects it and defaults to dot-config mode automatically:
+
+```bash
+ls .config   # already present
+cmake -S . -B build-stm32h7
+cmake --build build-stm32h7 -j
+```
+
+### Command-line variables
+
+Specify target and partition parameters directly on the CMake command line:
+
+```bash
+mkdir build && cd build
+cmake \
+  -DWOLFBOOT_TARGET=stm32h7 \
+  -DBUILD_TEST_APPS=yes \
+  -DWOLFBOOT_PARTITION_BOOT_ADDRESS=0x8020000 \
+  -DWOLFBOOT_SECTOR_SIZE=0x20000 \
+  -DWOLFBOOT_PARTITION_SIZE=0xD0000 \
+  -DWOLFBOOT_PARTITION_UPDATE_ADDRESS=0x80F0000 \
+  -DWOLFBOOT_PARTITION_SWAP_ADDRESS=0x81C0000 \
+  ..
+cmake --build . -j
+```
+
+Common target examples:
+
+```bash
+# STM32F4
+cmake -DWOLFBOOT_TARGET=stm32f4 \
+  -DWOLFBOOT_PARTITION_SIZE=0x20000 \
+  -DWOLFBOOT_SECTOR_SIZE=0x20000 \
+  -DWOLFBOOT_PARTITION_BOOT_ADDRESS=0x08020000 \
+  -DWOLFBOOT_PARTITION_UPDATE_ADDRESS=0x08040000 \
+  -DWOLFBOOT_PARTITION_SWAP_ADDRESS=0x08060000 \
+  ..
+
+# STM32L0 (write-once flash)
+cmake -DWOLFBOOT_TARGET=stm32l0 \
+  -DWOLFBOOT_PARTITION_BOOT_ADDRESS=0x8000 \
+  -DWOLFBOOT_SECTOR_SIZE=0x1000 \
+  -DWOLFBOOT_PARTITION_SIZE=0x10000 \
+  -DWOLFBOOT_PARTITION_UPDATE_ADDRESS=0x18000 \
+  -DWOLFBOOT_PARTITION_SWAP_ADDRESS=0x28000 \
+  -DNVM_FLASH_WRITEONCE=yes \
+  ..
+```
+
+To view all available CMake options for your configuration, append `-LAH`:
+
+```bash
+cmake -DWOLFBOOT_TARGET=stm32h7 \
+  -DWOLFBOOT_PARTITION_BOOT_ADDRESS=0x8020000 \
+  -DWOLFBOOT_SECTOR_SIZE=0x20000 \
+  -DWOLFBOOT_PARTITION_SIZE=0xD0000 \
+  -DWOLFBOOT_PARTITION_UPDATE_ADDRESS=0x80F0000 \
+  -DWOLFBOOT_PARTITION_SWAP_ADDRESS=0x81C0000 \
+  -LAH ..
+```
+
+### Signing and hash algorithms
+
+```bash
+cmake -DWOLFBOOT_TARGET=stm32h7 \
+  -DSIGN=ECC256 \
+  -DHASH=SHA256 \
+  ...
+```
+
+### Toolchain selection
+
+If `WOLFBOOT_TARGET` is not `x86_64_efi` or `sim`, CMake automatically selects `cmake/toolchain_arm-none-eabi.cmake`. Override with `-DCMAKE_TOOLCHAIN_FILE` if you need a different toolchain.
+
+  </Tab>
+</Tabs>
+
+## Building key tools separately
+
+The key tools (`keygen` and `sign`) are C programs compiled for the host machine. They do not depend on any installed libraries — wolfCrypt source is compiled directly into the tools.
+
+```bash
+# Build key tools (Makefile)
+make keytools
+
+# Remove generated keys (triggers key regeneration on next build)
+make keysclean
+```
+
+The tools are placed in `tools/keytools/`:
+
+| Tool | Purpose |
+|------|---------|
+| `tools/keytools/keygen` | Generate a new signing key pair; update `src/keystore.c` |
+| `tools/keytools/sign` | Sign a firmware binary and produce a manifest-prefixed image |
+
+### Using existing keys
+
+If you have an existing key pair (DER format), pass it to `make` so the build skips auto-generation:
+
+```bash
+make USER_PRIVATE_KEY=/path/to/signing-key.der \
+     USER_PUBLIC_KEY=/path/to/public-key.der
+```
+
+To import only a public key (when the private key is managed externally, e.g. in an HSM):
+
+```bash
+./tools/keytools/keygen --ecc256 -i my-public-key.der
+```
+
+This updates `src/keystore.c` with your public key. Firmware signing must then be done separately outside the build system.
+
+## Windows and IAR support
+
+<AccordionGroup>
+  <Accordion title="Visual Studio / Windows">
+    wolfBoot can be built on Windows using MinGW, Cygwin, or WSL. The key tools also build natively under Visual Studio.
+
+    When using `cl.exe` as the host compiler (`HOST_CC=cl.exe`), CMake creates a lightweight `unistd.h` shim automatically — no manual changes are needed.
+
+    If you see the following error, activate the Visual Studio Developer Command Prompt before building:
+
+    ```
+    fatal error C1083: Cannot open include file: 'stdio.h': No such file or directory
+    ```
+
+    Visual Studio and VS Code both detect `CMakePresets.json` automatically. Select the preset from the status bar or CMake menu.
+  </Accordion>
+  <Accordion title="IAR Embedded Workbench">
+    wolfBoot supports compilation with the IAR toolchain. IAR example projects are provided in the `IDE/` directory.
+
+    The `ARMORED` glitch-mitigation code supports the IAR compiler. If you encounter alignment issues, ensure `__attribute__((aligned))` is handled correctly for your IAR version.
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting build issues
+
+<AccordionGroup>
+  <Accordion title="Key algorithm mismatch">
+    ```
+    Key algorithm mismatch. Remove old keys via 'make keysclean'
+    ```
+
+    The `SIGN` algorithm in `.config` does not match the key already stored in `src/keystore.c`. Run `make keysclean` to delete the generated keys and regenerate them on the next build.
+  </Accordion>
+  <Accordion title="Python errors when signing">
+    ```
+    AttributeError: type object 'RsaPrivate' has no attribute 'make_key'
+    ```
+
+    Install the latest wolfcrypt-py:
+
+    ```bash
+    pip3 install wolfcrypt
+    ```
+
+    Or build against a local wolfSSL installation:
+
+    ```bash
+    cd wolfssl
+    ./configure --enable-keygen --enable-rsa --enable-ecc --enable-ed25519 \
+      --enable-des3 CFLAGS="-DFP_MAX_BITS=8192 -DWOLFSSL_PUBLIC_MP"
+    make && sudo make install
+    cd ../wolfcrypt-py
+    USE_LOCAL_WOLFSSL=/usr/local pip3 install .
+    ```
+  </Accordion>
+  <Accordion title="WOLFBOOT_PARTITION_BOOT_ADDRESS has no value">
+    ```
+    error: expected expression before ';' token
+      address = (uint32_t)WOLFBOOT_PARTITION_BOOT_ADDRESS;
+    ```
+
+    A failed config run left `include/target.h` with an empty `#define`. Rename or delete `target.h` (and optionally the entire build directory) to let the build system regenerate it cleanly.
+  </Accordion>
+  <Accordion title="Permission denied on compiler-generated files (Windows)">
+    ```
+    fatal error C1083: Cannot open compiler generated file: '...sp_c32.obj': Permission denied
+    ```
+
+    This can happen when multiple build environments are open simultaneously, or when antivirus software locks the file. Delete the build directory and restart your IDE.
+  </Accordion>
+  <Accordion title="CMake: 'no such instruction: isb'">
+    ```
+    Error: no such instruction: `isb'
+    ```
+
+    The wrong toolchain is selected or `WOLFBOOT_TARGET` was not set. Verify your preset or `-DWOLFBOOT_TARGET` value matches your hardware, and that the correct cross-compiler is on your `PATH`.
+  </Accordion>
+  <Accordion title="'stdint.h': No such file or directory">
+    ```
+    fatal error C1083: Cannot open include file: 'stdio.h': No such file or directory
+    ```
+
+    Check the compiler being used for host tools (`HOST_CC` in the build log). For Visual Studio builds, open a Developer Command Prompt before invoking `make` or `cmake`.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+  For platform-specific build details, see the [Supported Targets](/reference/targets/overview) reference pages.
+</Note>

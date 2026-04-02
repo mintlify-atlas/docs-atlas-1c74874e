@@ -1,80 +1,203 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quick Start"
+description: "Build a signed factory firmware image for your target from scratch using wolfBoot's Makefile build system."
+keywords: ["wolfBoot", "quickstart", "signed firmware", "factory image", "keytools", "make"]
 ---
 
-## Get started in three steps
+By the end of this guide you will have a `factory.bin` image that contains the wolfBoot bootloader and a signed firmware application ready to flash to your target device.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+- A Linux, macOS, or Windows (WSL/MinGW) host
+- GNU Make
+- A cross-compiler toolchain for your target (e.g. `arm-none-eabi-gcc` for ARM Cortex-M targets)
+- Python 3 (optional — only required if you want to use Python-based key tools instead of the compiled C tools)
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Info>
+  wolfBoot compiles its own key generation and signing tools in C. You do not need Python or wolfcrypt-py to get started.
+</Info>
 
-### Step 2: Deploy your changes
+## Steps
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Steps>
+  <Step title="Clone the repository">
+    Clone wolfBoot and initialize its git submodules. The submodules pull in wolfSSL, wolfTPM, and other dependencies under `lib/`.
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    ```bash
+    git clone https://github.com/wolfSSL/wolfBoot.git
+    cd wolfBoot
+    git submodule update --init
+    ```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    <Note>
+      If you downloaded a release archive instead of cloning, extract the wolfSSL source into `lib/wolfssl/` manually before continuing.
+    </Note>
+  </Step>
 
-### Step 3: Go live
+  <Step title="Copy a target configuration">
+    wolfBoot reads build settings from a `.config` file in the repository root. The `config/examples/` directory contains ready-made configurations for many supported targets.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    Choose the config that matches your hardware and copy it:
+
+    ```bash
+    # Example: STM32H7
+    cp config/examples/stm32h7.config .config
+
+    # Example: STM32F4
+    cp config/examples/stm32f4-small-blocks-uart-update.config .config
+
+    # Example: NXP i.MX-RT1060
+    cp config/examples/imx-rt1060.config .config
+
+    # Example: Simulator target (no hardware needed)
+    cp config/examples/sim.config .config
+    ```
+
+    The `stm32h7.config` file looks like this:
+
+    ```ini
+    ARCH?=ARM
+    TARGET?=stm32h7
+    SIGN?=ECC256
+    HASH?=SHA256
+    WOLFBOOT_PARTITION_SIZE?=0xD0000
+    WOLFBOOT_SECTOR_SIZE?=0x20000
+    WOLFBOOT_PARTITION_BOOT_ADDRESS?=0x8020000
+    WOLFBOOT_PARTITION_UPDATE_ADDRESS?=0x80F0000
+    WOLFBOOT_PARTITION_SWAP_ADDRESS?=0x81C0000
+    ```
+
+    You can edit `.config` with a text editor to adjust partition addresses, sizes, and feature flags. See [Building wolfBoot](/building) for a full reference of configuration options.
+
+    Alternatively, run `make config` to walk through an interactive prompt that sets each parameter with defaults shown in brackets.
+  </Step>
+
+  <Step title="Build the key tools">
+    wolfBoot includes C-based tools for generating signing keys and signing firmware images. Build them before the first `make`:
+
+    ```bash
+    make keytools
+    ```
+
+    This compiles `tools/keytools/keygen` and `tools/keytools/sign` from source. These are the tools used to generate the cryptographic key pair and sign firmware images during the build.
+
+    <Tip>
+      If you already have wolfcrypt-py installed (`pip3 install wolfcrypt`), you can skip this step — the build system will use the Python tools automatically.
+    </Tip>
+  </Step>
+
+  <Step title="Build wolfBoot and the signed firmware image">
+    Run `make` to build everything in one step:
+
+    ```bash
+    make
+    ```
+
+    The default `make` target performs the following sequence automatically:
+
+    1. **Generate keys** — creates `wolfboot_signing_private_key.der` and embeds the public key in `src/keystore.c`
+    2. **Compile the bootloader** — builds `wolfboot.elf` and `wolfboot.bin` with the public key baked in
+    3. **Compile the test application** — builds the example firmware in `test-app/`
+    4. **Re-link the firmware** — adjusts the entry point to the start of the BOOT partition
+    5. **Sign the firmware** — runs the sign tool to produce `test-app/image_v1_signed.bin`
+    6. **Assemble the factory image** — concatenates the bootloader and signed firmware into `factory.bin`
+
+    The final output `factory.bin` contains the bootloader at flash offset 0 and the signed firmware at `WOLFBOOT_PARTITION_BOOT_ADDRESS`.
+  </Step>
+
+  <Step title="Flash the factory image">
+    Flash `factory.bin` to your target starting at the base of flash. The exact command depends on your programmer:
+
+    ```bash
+    # ST-Link / OpenOCD (STM32 example)
+    openocd -f interface/stlink.cfg -f target/stm32h7x.cfg \
+      -c "program factory.bin 0x08000000 verify reset exit"
+
+    # J-Link
+    JLinkExe -device STM32H743ZI -if SWD -speed 4000 \
+      -CommanderScript flash.jlink
+    ```
+
+    <Note>
+      The base flash address (e.g. `0x08000000` for STM32) must match where your linker script places the bootloader — before `WOLFBOOT_PARTITION_BOOT_ADDRESS`.
+    </Note>
+  </Step>
+
+  <Step title="Confirm boot success in your application">
+    When wolfBoot boots for the first time after an update, the firmware must call `wolfBoot_success()` to confirm the image is working. If your application does not call this before a reset, wolfBoot will roll back to the previous image on the next boot.
+
+    Add the wolfBoot library to your application and call success after startup validation:
+
+    ```c
+    #include <wolfboot/wolfboot.h>
+
+    int main(void)
+    {
+        /* Initialize your hardware */
+        board_init();
+
+        /* Perform any self-tests or connectivity checks */
+        if (self_test_ok()) {
+            /* Confirm this firmware is good — prevents rollback */
+            wolfBoot_success();
+        }
+
+        /* Continue with your application */
+        app_run();
+        return 0;
+    }
+    ```
+  </Step>
+</Steps>
+
+## Understanding the factory image
+
+The `factory.bin` image is the combination of two binaries placed at specific flash addresses:
+
+```text
+Flash layout (STM32H7 example):
+┌─────────────────────────────┐ 0x08000000  ← base of flash
+│  wolfBoot bootloader        │
+│  wolfboot.bin               │
+├─────────────────────────────┤ 0x08020000  ← WOLFBOOT_PARTITION_BOOT_ADDRESS
+│  Signed firmware            │
+│  image_v1_signed.bin        │
+│  (manifest header + app)    │
+├─────────────────────────────┤ 0x080F0000  ← WOLFBOOT_PARTITION_UPDATE_ADDRESS
+│  UPDATE partition           │
+│  (empty on first flash)     │
+├─────────────────────────────┤ 0x081C0000  ← WOLFBOOT_PARTITION_SWAP_ADDRESS
+│  SWAP partition             │
+│  (one sector, used by boot) │
+└─────────────────────────────┘
+```
+
+The bootloader lives below `WOLFBOOT_PARTITION_BOOT_ADDRESS`. The signed firmware image begins with a 256-byte manifest header that contains the version number, hash, and signature. wolfBoot verifies this header before every boot.
+
+## Upgrading firmware
+
+Once your device is running, use `sign.py` or the compiled `sign` tool to sign a new firmware binary, then deliver it to the UPDATE partition:
+
+```bash
+./tools/keytools/sign --ecc256 --sha256 \
+    new_firmware.bin wolfboot_signing_private_key.der 2
+```
+
+Then transfer `new_firmware_v2_signed.bin` to the UPDATE partition via your application's update channel, call `wolfBoot_update_trigger()`, and reboot.
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Building wolfBoot" icon="hammer" href="/building">
+    All Makefile and CMake options, cross-compilation, IDE support, and key tool details.
+  </Card>
+  <Card title="Flash partitions" icon="layer-group" href="/concepts/flash-partitions">
+    Understand how BOOT, UPDATE, and SWAP partitions are sized and addressed.
+  </Card>
+  <Card title="Firmware signing" icon="key" href="/security/signing">
+    Sign firmware images with ECC, RSA, Ed25519, or post-quantum algorithms.
+  </Card>
+  <Card title="Firmware update" icon="arrows-rotate" href="/concepts/firmware-update">
+    Deliver and trigger updates from your application using the libwolfboot API.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

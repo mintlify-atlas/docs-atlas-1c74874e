@@ -1,0 +1,139 @@
+---
+title: "Measured boot"
+description: "Record tamper-evident measurements of the wolfBoot bootloader into TPM PCR registers so the application can verify system integrity at runtime."
+---
+
+Measured boot records cryptographic digests of software components into the Platform Configuration Registers (PCRs) of a Trusted Platform Module (TPM). PCRs can only be reset on TPM power-on, so the measurement log is tamper-evident for the duration of a boot session.
+
+wolfBoot integrates with wolfTPM to extend PCRs during the boot process, giving the running firmware — or a remote attestation service — a way to verify that the bootloader has not been modified.
+
+## How it works
+
+Secure boot verifies the firmware signature and either boots or halts — but this knowledge is not available to the application after boot. Measured boot fills this gap:
+
+1. wolfBoot computes a hash of its own code region (or the boot partition, optionally).
+2. wolfBoot calls the TPM `PCR_Extend` operation to mix that hash into the selected PCR.
+3. The application or OS reads the PCR value and compares it to the expected value for a known-good bootloader.
+
+A modified wolfBoot binary produces a different hash and a different PCR value, which the application can detect.
+
+## Build configuration
+
+Add the following to your wolfBoot `.config`:
+
+```
+MEASURED_BOOT=1
+MEASURED_PCR_A=16
+```
+
+`MEASURED_PCR_A` selects the PCR index (0–23) where the measurement is stored.
+
+<Note>
+  Use PCR 16 during development — it is designated for testing. See the PCR index guide below for production recommendations.
+</Note>
+
+By default, wolfBoot measures its own code region. To measure the boot (application) partition instead:
+
+```
+MEASURED_BOOT_APP_PARTITION=1
+```
+
+### Development example
+
+```
+MEASURED_BOOT=1
+MEASURED_PCR_A=16
+```
+
+## PCR index selection guide
+
+Any TPM provides at least 24 PCR registers. Typical assignments are:
+
+| Index | Typical use | Recommended for |
+|-------|-------------|-----------------|
+| 0 | Core Root of Trust / BIOS | bare-metal, RTOS |
+| 1 | Platform Configuration Data | bare-metal, RTOS |
+| 2–3 | Option ROM code | bare-metal, RTOS |
+| 4–5 | Master Boot Record | bare-metal, RTOS |
+| 6 | State transitions | bare-metal, RTOS |
+| 7 | Vendor specific | bare-metal, RTOS |
+| 8–9 | Partition measurements | bare-metal, RTOS |
+| 10 | Boot Manager | bare-metal, RTOS |
+| 11 | Microsoft BitLocker | — |
+| 12–15 | Available for general use | bare-metal, RTOS, Linux, Windows |
+| 16 | Debug / testing | Development only |
+| 17 | DRTM | Trusted bootloader |
+| 18–22 | Trusted OS | TEE |
+| 23 | Application (temporary) | Temporary measurements only |
+
+Recommendations:
+- **Development**: use PCR 16.
+- **Bare-metal / RTOS in production**: PCR 0–15 are available (avoid 17–23).
+- **Linux / Windows in production**: use PCR 12–15 to avoid conflicts with the Linux IMA subsystem and Microsoft BitLocker.
+
+## Implementation details
+
+wolfBoot implements measured boot in `src/tpm.c`. The key functions are:
+
+- `self_hash()` — hashes the wolfBoot code region.
+- `measure_boot()` — extends the selected PCR with the computed hash.
+
+No changes to wolfBoot source code are required. Setting `MEASURED_BOOT=1` and `MEASURED_PCR_A` in your config is sufficient.
+
+## Using measurements in the application
+
+After wolfBoot runs, the application can read the PCR value from the TPM using wolfTPM and compare it to the expected digest for a trusted wolfBoot build.
+
+```c
+#include "wolftpm/tpm2_wrap.h"
+
+WOLFTPM2_DEV dev;
+TPM2B_DIGEST pcr_value;
+TPML_DIGEST_VALUES digests;
+
+/* Initialize wolfTPM */
+wolfTPM2_Init(&dev, NULL, NULL);
+
+/* Read PCR 16 (SHA-256 bank) */
+wolfTPM2_ReadPCR(&dev, 16, TPM_ALG_SHA256, pcr_value.buffer, (int*)&pcr_value.size);
+
+/* Compare pcr_value.buffer to the expected digest for your wolfBoot build */
+```
+
+### wolfBoot_tpm2_extend API
+
+wolfBoot exposes a helper function so application code or late-stage boot components can extend additional PCRs:
+
+```c
+int wolfBoot_tpm2_extend(uint8_t algo, uint8_t *hash, int pcrIndex);
+```
+
+- `algo` — hash algorithm (e.g., `XMSS_SHA2_256`).
+- `hash` — pointer to the digest buffer.
+- `pcrIndex` — PCR index to extend.
+
+Use this function to extend measurements of application components, configuration data, or user partitions beyond the wolfBoot code region.
+
+## DICE support
+
+wolfBoot measured boot is compatible with DICE (Device Identifier Composition Engine). DICE uses layered measurements to derive a unique device identity that changes if any measured component is modified.
+
+<Info>
+  DICE integration requires additional configuration and is documented separately in the wolfBoot source under `docs/DICE.md`.
+</Info>
+
+## TPM prerequisites
+
+Measured boot requires:
+- A TPM 2.0 chip connected to the target.
+- wolfTPM built and linked with wolfBoot.
+- The `WOLFTPM` and `MEASURED_BOOT` options enabled in the build configuration.
+
+<CardGroup cols={2}>
+  <Card title="TPM integration" icon="shield-check" href="/integrations/tpm">
+    Set up wolfTPM with wolfBoot.
+  </Card>
+  <Card title="wolfHSM integration" icon="microchip" href="/integrations/wolfhsm">
+    Use wolfHSM for hardware-backed key storage.
+  </Card>
+</CardGroup>

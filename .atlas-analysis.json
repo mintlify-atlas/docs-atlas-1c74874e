@@ -1,28 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "wolfBoot",
+  "projectType": "general",
+  "projectName": "wolfBoot",
+  "projectDescription": "A portable, OS-agnostic secure bootloader for 32-bit microcontrollers that provides firmware authentication and update mechanisms using wolfCrypt digital signatures.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#1ebfcd",
-    "light": "#040404",
-    "dark": "#1e393b"
-  },
-  "favicon": "https://media.brand.dev/8432ae77-665e-4059-95f3-272d6e911e4f.jpg",
-  "logo": {
-    "light": "https://media.brand.dev/6984575b-25d8-4ce3-903f-3feff8bfafdf.png",
-    "dark": "https://media.brand.dev/6984575b-25d8-4ce3-903f-3feff8bfafdf.png"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/wolfSSL/wolfBoot"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/wolfSSL/wolfBoot"
-    }
-  },
+  "primaryColor": "#1ebfcd",
+  "lightColor": "#040404",
+  "darkColor": "#1e393b",
   "navigation": {
     "tabs": [
       {
@@ -104,5 +87,38 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Multi-slot flash partitioning with BOOT, UPDATE, and SWAP partitions",
+    "Firmware integrity and authenticity verification via wolfCrypt digital signatures",
+    "Support for ECC (P-256/P-384/P-521), RSA (2048/3072/4096), Ed25519/Ed448 signature algorithms",
+    "Post-quantum algorithm support: ML-DSA, LMS/HSS, XMSS/XMSS^MT",
+    "TPM 2.0 integration for measured boot, root of trust, and sealing/unsealing",
+    "Encrypted external firmware update partitions",
+    "Delta (incremental) firmware updates to reduce bandwidth",
+    "Minimalist Hardware Abstraction Layer (HAL) for easy porting to new MCUs",
+    "TrustZone-M support on ARMv8-M (Cortex-M33) targets",
+    "wolfHSM integration for offloading cryptographic operations",
+    "Powerfail-safe firmware update with automatic rollback",
+    "Anti-rollback protection via firmware version numbers",
+    "Fault-injection and glitch attack mitigations"
+  ],
+  "publicApiSurface": [
+    "wolfBoot_get_image_version(uint8_t part)",
+    "wolfBoot_update_trigger(void)",
+    "wolfBoot_success(void)",
+    "wolfBoot_current_firmware_version()",
+    "wolfBoot_update_firmware_version()",
+    "wolfBoot_get_partition_state(uint8_t part, uint8_t *st)",
+    "wolfBoot_nsc_success(void)",
+    "wolfBoot_nsc_update_trigger(void)",
+    "wolfBoot_nsc_get_image_version(uint8_t part)",
+    "hal_init(void)",
+    "hal_flash_write(uint32_t address, const uint8_t *data, int len)",
+    "hal_flash_erase(uint32_t address, int len)",
+    "hal_flash_lock(void)",
+    "hal_flash_unlock(void)",
+    "keygen [OPTIONS] [-g new-keypair.der] [-i existing-pubkey.der]",
+    "sign [OPTIONS] IMAGE.BIN KEY.DER VERSION"
+  ]
 }
